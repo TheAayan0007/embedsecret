@@ -1299,13 +1299,20 @@ function submitRetrieveImage(){
       }
 
       const sepIdx=decoded.indexOf(':');
-      if(sepIdx===-1){ showResult(resId,'error','No Data Found','No hidden message was found in this image.'); return; }
+      if(sepIdx===-1){
+        const preview=decoded.substring(0,40).replace(/[^\x20-\x7E]/g,'·');
+        showResult(resId,'error','No Data Found',
+          `No hidden message found. First decoded bytes: "${preview}"\n\n` +
+          `Common causes: (1) Image was re-saved as JPEG after embedding — JPEG is lossy and destroys LSB data. Always use the PNG downloaded directly from AVS. ` +
+          `(2) Wrong image uploaded. (3) Image was screenshot instead of downloaded.`);
+        return;
+      }
 
       const storedEncPw=decoded.substring(0,sepIdx);
       const secretMsg=decoded.substring(sepIdx+1);
       const storedPw=decryptPw(storedEncPw);
 
-      if(storedPw===null){ showResult(resId,'error','Decryption Failed','Could not decrypt the embedded data.'); return; }
+      if(storedPw===null){ showResult(resId,'error','Decryption Failed',`Could not decrypt embedded data. Decoded prefix: "${storedEncPw.substring(0,30)}"`); return; }
       if(pw!==storedPw){ showResult(resId,'error','Wrong Password','The password is incorrect.'); return; }
 
       showResult(resId,'success','✓ Message Retrieved',sanitizeHTML(secretMsg));
