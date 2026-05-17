@@ -1773,17 +1773,24 @@ async function extractImageFromImage(){
     const headerPx=16;
 
     // ── READ HEADER ──
-    let headerBits='';
+    // Collect the 2-LSB slots in the same order the writer packed them:
+    // writer did: for each px 0..15, for each ch 0..2, write 2 bits, bi+=2
+    // So we read back those exact 2-bit slots as a flat stream, then
+    // reassemble into bytes (4 slots × 2 bits = 8 bits per byte).
+    const headerSlots = []; // each entry is a 2-bit value (0-3)
     for(let px=0;px<headerPx;px++){
       const base=px*4;
       for(let ch=0;ch<3;ch++){
-        headerBits+=((sd[base+ch]>>1)&1).toString();
-        headerBits+=(sd[base+ch]&1).toString();
+        headerSlots.push(sd[base+ch]&0x3); // the 2 LSBs
       }
     }
-    // parse 8 bytes
+    // headerSlots has 48 entries (16px × 3ch). 8 bytes × 4 slots each = 32 slots needed.
     const hBytes=[];
-    for(let i=0;i<8;i++) hBytes.push(parseInt(headerBits.substr(i*8,8),2));
+    for(let i=0;i<8;i++){
+      const s=i*4;
+      const byte=(headerSlots[s]<<6)|(headerSlots[s+1]<<4)|(headerSlots[s+2]<<2)|headerSlots[s+3];
+      hBytes.push(byte&0xFF);
+    }
     const sW=(hBytes[0]<<8)|hBytes[1];
     const sH=(hBytes[2]<<8)|hBytes[3];
     const storedHash=((hBytes[4]<<24)|(hBytes[5]<<16)|(hBytes[6]<<8)|hBytes[7])>>>0;
