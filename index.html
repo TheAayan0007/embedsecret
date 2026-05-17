@@ -1273,24 +1273,21 @@ function submitRetrieveImage(){
   if(!imgInp.files.length){ showResult(resId,'error','Error','Please select an image file.'); return; }
   if(!pw){ showResult(resId,'error','Error','Please enter the password.'); return; }
 
-  const reader=new FileReader();
-  reader.onload=e=>{
-    const img=new Image();
-    img.onload=()=>{
+  createImageBitmap(imgInp.files[0],{colorSpaceConversion:'none'})
+    .then(bitmap=>{
       const canvas=document.createElement('canvas');
-      canvas.width=img.width; canvas.height=img.height;
+      canvas.width=bitmap.width; canvas.height=bitmap.height;
       const ctx=canvas.getContext('2d');
-      ctx.drawImage(img,0,0);
+      ctx.drawImage(bitmap,0,0);
+      bitmap.close();
       const data=ctx.getImageData(0,0,canvas.width,canvas.height).data;
 
-      // Extract LSBs
       let bits='';
       for(let i=0;i<data.length;i++){
         if((i%4)===3) continue;
         bits+=(data[i]&1).toString();
       }
 
-      // Decode bits to string, stop at null terminator
       let decoded='';
       for(let i=0;i+7<bits.length;i+=8){
         const ch=String.fromCharCode(parseInt(bits.substr(i,8),2));
@@ -1302,9 +1299,7 @@ function submitRetrieveImage(){
       if(sepIdx===-1){
         const preview=decoded.substring(0,40).replace(/[^\x20-\x7E]/g,'·');
         showResult(resId,'error','No Data Found',
-          `No hidden message found. First decoded bytes: "${preview}"\n\n` +
-          `Common causes: (1) Image was re-saved as JPEG after embedding — JPEG is lossy and destroys LSB data. Always use the PNG downloaded directly from AVS. ` +
-          `(2) Wrong image uploaded. (3) Image was screenshot instead of downloaded.`);
+          `No hidden message found. Decoded: "${preview}" — image may have been re-saved as JPEG (lossy) or is the wrong file.`);
         return;
       }
 
@@ -1312,16 +1307,12 @@ function submitRetrieveImage(){
       const secretMsg=decoded.substring(sepIdx+1);
       const storedPw=decryptPw(storedEncPw);
 
-      if(storedPw===null){ showResult(resId,'error','Decryption Failed',`Could not decrypt embedded data. Decoded prefix: "${storedEncPw.substring(0,30)}"`); return; }
+      if(storedPw===null){ showResult(resId,'error','Decryption Failed',`Could not decrypt embedded data.`); return; }
       if(pw!==storedPw){ showResult(resId,'error','Wrong Password','The password is incorrect.'); return; }
 
       showResult(resId,'success','✓ Message Retrieved',sanitizeHTML(secretMsg));
-    };
-    img.onerror=()=>showResult(resId,'error','Error','Could not load the image.');
-    img.src=e.target.result;
-  };
-  reader.onerror=()=>showResult(resId,'error','Error','Failed to read the file.');
-  reader.readAsDataURL(imgInp.files[0]);
+    })
+    .catch(err=>showResult(resId,'error','Error','Could not load image: '+err.message));
 }
 
 /* ══ EMBED VIDEO STEGANOGRAPHY ══ */
@@ -1539,16 +1530,32 @@ function resizeCanvas(src, scale){
 
 function loadImageToCanvas(file){
   return new Promise((resolve,reject)=>{
-    const url=URL.createObjectURL(file);
-    const img=new Image();
-    img.onload=()=>{
-      const c=document.createElement('canvas');
-      c.width=img.width; c.height=img.height;
-      c.getContext('2d').drawImage(img,0,0);
-      resolve({canvas:c, ctx:c.getContext('2d'), w:img.width, h:img.height});
-    };
-    img.onerror=()=>reject(new Error('Failed to load image'));
-    img.src=url;
+    // Use colorSpaceConversion:'none' so the browser does NOT apply ICC profile
+    // correction when decoding the PNG — that correction alters pixel values and
+    // corrupts LSB steganographic data before we ever read it.
+    createImageBitmap(file,{colorSpaceConversion:'none'})
+      .then(bitmap=>{
+        const c=document.createElement('canvas');
+        c.width=bitmap.width; c.height=bitmap.height;
+        const ctx=c.getContext('2d');
+        ctx.drawImage(bitmap,0,0);
+        bitmap.close();
+        resolve({canvas:c,ctx,w:c.width,h:c.height});
+      })
+      .catch(()=>{
+        // Fallback for browsers without colorSpaceConversion support
+        const url=URL.createObjectURL(file);
+        const img=new Image();
+        img.onload=()=>{
+          const c=document.createElement('canvas');
+          c.width=img.width; c.height=img.height;
+          c.getContext('2d').drawImage(img,0,0);
+          URL.revokeObjectURL(url);
+          resolve({canvas:c,ctx:c.getContext('2d'),w:img.width,h:img.height});
+        };
+        img.onerror=()=>{URL.revokeObjectURL(url);reject(new Error('Failed to load image'));};
+        img.src=url;
+      });
   });
 }
 
