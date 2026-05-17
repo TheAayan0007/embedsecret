@@ -828,7 +828,7 @@ input[type=range].popup-slider::-webkit-slider-thumb {
   <!-- IMAGE IN IMAGE STEG -->
   <div class="panel" id="steg-steg-img-in-img">
     <div class="form-card reveal rd2">
-      <div class="info-strip"><strong>Image-in-Image LSB:</strong> Hides a secret image (X) inside a carrier image (Y) by encoding X's pixel data into the 2 least-significant bits of Y's channels. Y looks visually identical — no visible change to the human eye.</div>
+      <div class="info-strip"><strong>Secure Image-in-Image:</strong> Encrypts the secret image with <strong>AES-256-GCM</strong> (PBKDF2, 150k iterations) then hides the encrypted bytes in the <strong>1 LSB</strong> of each R,G,B channel of the carrier. The carrier looks visually identical. Output is always PNG — never re-save as JPEG.</div>
       <div class="sub-tabs">
         <button class="sub-btn active" onclick="switchSub('iig','embed-iig',this)"><i class="fas fa-layer-group"></i><span>Embed Image</span></button>
         <button class="sub-btn" onclick="switchSub('iig','extract-iig',this)"><i class="fas fa-eye"></i><span>Extract Image</span></button>
@@ -1406,7 +1406,7 @@ function previewCarrier(){
   const img=new Image();
   img.onload=()=>{
     document.getElementById('prev-carrier').src=url;
-    document.getElementById('carrier-info').textContent=`${img.width} × ${img.height}px — capacity: ${Math.floor((img.width*img.height-16)/4).toLocaleString()} secret px max`;
+    document.getElementById('carrier-info').textContent=`${img.width} × ${img.height}px — capacity: ~${Math.floor(img.width*img.height*3/8/1024)} KB payload max (1-bit LSB)`;
     document.getElementById('iig-previews').style.display='block';
     updateCapacityBar();
   };
@@ -1435,15 +1435,16 @@ function updateCapacityBar(){
   const sInp=document.getElementById('secretImage');
   if(!cInp.files.length||!sInp.files.length) return;
   const ci=document.getElementById('prev-carrier');
-  const si=document.getElementById('prev-secret');
-  if(!ci.naturalWidth||!si.naturalWidth) return;
+  if(!ci.naturalWidth) return;
 
-  const carrierPx = ci.naturalWidth * ci.naturalHeight;
-  const secretPx  = si.naturalWidth * si.naturalHeight;
-  const headerPx  = 16;
-  const needed    = secretPx * 4 + headerPx;
-  const rawPct    = needed / carrierPx;
-  const pct       = Math.min(200, Math.round(rawPct * 100)); // cap display at 200%
+  const carrierPx   = ci.naturalWidth * ci.naturalHeight;
+  // 1 bit per R,G,B channel → capacity in bytes
+  const availBytes  = Math.floor(carrierPx * 3 / 8);
+  // Rough payload size = secret file size + ~300 bytes AES-GCM/JSON overhead
+  const secretFileBytes = sInp.files[0].size;
+  const neededBytes = secretFileBytes + 300;
+  const rawPct      = neededBytes / availBytes;
+  const pct         = Math.min(200, Math.round(rawPct * 100));
 
   const fill = document.getElementById('capacity-fill');
   const lbl  = document.getElementById('capacity-label');
@@ -1456,25 +1457,13 @@ function updateCapacityBar(){
       ? 'linear-gradient(90deg,var(--amber),#d97706)'
       : 'linear-gradient(90deg,var(--green),var(--cyan))';
 
-  lbl.textContent = `${pct}% capacity used — ${secretPx.toLocaleString()} secret px needs ${needed.toLocaleString()} carrier px, have ${carrierPx.toLocaleString()}`;
+  lbl.textContent = `${pct}% capacity used — secret file ${(secretFileBytes/1024).toFixed(1)} KB needs ~${(neededBytes/1024).toFixed(1)} KB, carrier holds ~${(availBytes/1024).toFixed(1)} KB`;
   lbl.style.color = pct >= 100 ? '#ef4444' : 'var(--text-dim)';
 
-  // Show warning popup immediately if over limit, and pre-wire pending compress
   if(pct >= 100){
-    const resId = 'iigEmbedResult';
-    showCapacityPopup(carrierPx, secretPx, needed, pct,
-      ci.naturalWidth, ci.naturalHeight,
-      si.naturalWidth, si.naturalHeight);
-    // Wire pending compress so Confirm works from the capacity bar trigger too
-    _pendingCompress = async (scale) => {
-      showResult(resId,'success','Processing...',`Compressing secret image to ${Math.round(scale*100)}% — please wait...`);
-      try {
-        const carrier = await loadImageToCanvas(document.getElementById('carrierImage').files[0]);
-        const secretRaw = await loadImageToCanvas(document.getElementById('secretImage').files[0]);
-        const compressed = resizeCanvas(secretRaw, scale);
-        await _doEmbed(carrier, compressed, document.getElementById('iigPassword').value, resId);
-      } catch(err){ showResult(resId,'error','Error',err.message); }
-    };
+    showErrorPopup('Carrier Too Small',
+      `The carrier image cannot hold the encrypted secret file.`,
+      `Secret file (${(secretFileBytes/1024).toFixed(1)} KB) + AES-GCM overhead needs ~${(neededBytes/1024).toFixed(1)} KB, but the carrier only has ~${(availBytes/1024).toFixed(1)} KB capacity. Use a larger carrier image.`);
   }
 }
 
@@ -1604,287 +1593,275 @@ function epEta(t){ document.getElementById('epEta').textContent=t; }
 /* Yield to browser to repaint */
 function yieldFrame(){ return new Promise(r=>setTimeout(r,0)); }
 
+/* ══════════════════════════════════════════════════════════════
+   IMAGE-IN-IMAGE — SECURE AES-GCM + 1-bit LSB ENGINE
+   (Exact mechanism from index2.html / Secure Steganography Vault)
+   ══════════════════════════════════════════════════════════════ */
+const IIG_MAGIC = "STEGO_SECURE_V2";
+
+async function iigDeriveKey(password, salt){
+  const encoder = new TextEncoder();
+  const keyMaterial = await crypto.subtle.importKey(
+    "raw", encoder.encode(password), {name:"PBKDF2"}, false, ["deriveKey"]
+  );
+  return await crypto.subtle.deriveKey(
+    {name:"PBKDF2", salt, iterations:150000, hash:"SHA-256"},
+    keyMaterial,
+    {name:"AES-GCM", length:256},
+    false,
+    ["encrypt","decrypt"]
+  );
+}
+
+async function iigEncryptData(buffer, password){
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv   = crypto.getRandomValues(new Uint8Array(12));
+  const key  = await iigDeriveKey(password, salt);
+  const encrypted = await crypto.subtle.encrypt({name:"AES-GCM", iv}, key, buffer);
+  return { encrypted: new Uint8Array(encrypted), salt, iv };
+}
+
+async function iigDecryptData(encrypted, password, salt, iv){
+  const key = await iigDeriveKey(password, salt);
+  return await crypto.subtle.decrypt({name:"AES-GCM", iv}, key, encrypted);
+}
+
+function iigBytesToBits(bytes){
+  const bits = [];
+  for(const byte of bytes)
+    for(let i=7;i>=0;i--) bits.push((byte>>i)&1);
+  return bits;
+}
+
+function iigBitsToBytes(bits){
+  const bytes = [];
+  for(let i=0;i<bits.length;i+=8){
+    let byte=0;
+    for(let j=0;j<8;j++) byte=(byte<<1)|bits[i+j];
+    bytes.push(byte);
+  }
+  return new Uint8Array(bytes);
+}
+
 async function embedImageInImage(){
-  const cInp=document.getElementById('carrierImage');
-  const sInp=document.getElementById('secretImage');
-  const pw=document.getElementById('iigPassword').value;
-  const resId='iigEmbedResult';
+  const cInp  = document.getElementById('carrierImage');
+  const sInp  = document.getElementById('secretImage');
+  const pw    = document.getElementById('iigPassword').value;
+  const resId = 'iigEmbedResult';
 
   if(!cInp.files.length){ showErrorPopup('Missing Carrier','Please select a carrier image (Y) first.'); return; }
   if(!sInp.files.length){ showErrorPopup('Missing Secret Image','Please select a secret image (X) to hide.'); return; }
+  if(!pw){ showErrorPopup('Missing Password','Please enter a password to encrypt the hidden image.'); return; }
 
-  // Reset result + show progress
-  const resultEl=document.getElementById(resId);
+  const resultEl = document.getElementById(resId);
   resultEl.className='result-box'; resultEl.innerHTML='';
-  epTitle('Loading Images'); epSet(0,'Reading files…',0); epShow(); epEta('');
+  epTitle('Reading Images'); epSet(0,'Loading files…',0); epShow(); epEta('');
 
   try {
     await yieldFrame();
     const carrier = await loadImageToCanvas(cInp.files[0]);
-    epSet(8,'Carrier loaded…',0); await yieldFrame();
-    let secret = await loadImageToCanvas(sInp.files[0]);
-    epSet(15,'Images ready',0); await yieldFrame();
+    epSet(10,'Carrier loaded…',0); await yieldFrame();
 
-    const cW=carrier.w, cH=carrier.h;
-    const headerPx=16;
-    const carrierPx = cW*cH;
+    // ── Read hidden image as raw bytes ──
+    const hiddenBuffer = await sInp.files[0].arrayBuffer();
+    epSet(20,'Encrypting hidden image with AES-GCM…',1); await yieldFrame();
 
-    // ── AUTO-COMPRESS if over capacity ──
-    if(secret.w * secret.h * 4 + headerPx > carrierPx){
-      const maxSecretPx = Math.floor((carrierPx - headerPx) / 4);
-      const ratio = Math.sqrt(maxSecretPx / (secret.w * secret.h));
-      const autoScale = Math.max(0.05, Math.min(0.95, ratio * 0.97)); // 3% safety margin
+    // ── AES-GCM encrypt (exact mechanism from Secure Steganography Vault) ──
+    const encObj = await iigEncryptData(hiddenBuffer, pw);
 
-      const origW=secret.w, origH=secret.h;
-      const newW=Math.max(1,Math.floor(origW*autoScale));
-      const newH=Math.max(1,Math.floor(origH*autoScale));
+    const payload = {
+      magic:    IIG_MAGIC,
+      filename: sInp.files[0].name,
+      mime:     sInp.files[0].type,
+      salt:     Array.from(encObj.salt),
+      iv:       Array.from(encObj.iv),
+      data:     Array.from(encObj.encrypted)
+    };
 
-      epTitle('Auto-Compressing'); epSet(18,`Secret too large — scaling to ${newW}×${newH}px…`,0); await yieldFrame();
+    const encoder      = new TextEncoder();
+    const payloadBytes = encoder.encode(JSON.stringify(payload));
+    const lenBytes     = new Uint8Array(new Uint32Array([payloadBytes.length]).buffer);
+    const combined     = new Uint8Array(4 + payloadBytes.length);
+    combined.set(lenBytes, 0);
+    combined.set(payloadBytes, 4);
 
-      // Show popup to inform user, but don't block — embed continues automatically
-      showCapacityPopup(carrierPx, origW*origH, origW*origH*4+headerPx,
-        Math.round((origW*origH*4+headerPx)/carrierPx*100), cW,cH, origW,origH);
-      // Auto-confirm after a brief delay so user sees the popup
-      _pendingCompress = null; // prevent double-fire
-      await new Promise(r=>setTimeout(r,1200));
-      dismissPopup();
+    const bits = iigBytesToBits(combined);
 
-      secret = resizeCanvas(secret, autoScale);
-      epSet(25,`Compressed to ${secret.w}×${secret.h}px`,0); await yieldFrame();
+    epSet(38,'Checking capacity…',1); await yieldFrame();
+
+    const imageData = carrier.ctx.getImageData(0,0,carrier.w,carrier.h);
+    const pd        = imageData.data;
+    // 1 bit per R,G,B channel (skip alpha) — same as Secure Steganography Vault
+    const usableBits = Math.floor((pd.length / 4) * 3);
+
+    if(bits.length > usableBits){
+      epHide();
+      showErrorPopup('Carrier Image Too Small',
+        `The carrier cannot hold the encrypted hidden image after AES-GCM encryption.`,
+        `Need ${bits.length.toLocaleString()} bits (${(bits.length/8/1024).toFixed(1)} KB) but carrier only has ${usableBits.toLocaleString()} usable bits (${(usableBits/8/1024).toFixed(1)} KB). Use a larger carrier image.`);
+      return;
     }
 
-    await _doEmbed(carrier, secret, pw, resId);
+    epTitle('Embedding Data'); epSet(40,'Writing encrypted bits into carrier pixels…',2); await yieldFrame();
+
+    // ── 1-bit LSB embed into R,G,B (skip alpha) ──
+    let bitIndex = 0;
+    const CHUNK  = 150000;
+    for(let i=0;i<pd.length;i++){
+      if((i+1)%4===0) continue; // skip alpha
+      if(bitIndex < bits.length){
+        pd[i] = (pd[i] & 0xFE) | bits[bitIndex];
+        bitIndex++;
+      }
+      if(i % CHUNK === 0 && i > 0){
+        const pct = 40 + (bitIndex/bits.length)*50;
+        epSet(pct, `${(bitIndex/1000).toFixed(0)}k / ${(bits.length/1000).toFixed(0)}k bits`, 2);
+        await yieldFrame();
+      }
+    }
+
+    carrier.ctx.putImageData(imageData, 0, 0);
+    epTitle('Finalising'); epSet(92,'Generating output PNG…',3); await yieldFrame();
+
+    carrier.canvas.toBlob(blob=>{
+      epSet(100,'Done!',3); epEta('');
+      setTimeout(()=>{ epHide(); }, 400);
+
+      const url = URL.createObjectURL(blob);
+      const fn  = randomName('png');
+      const el  = document.getElementById(resId);
+      el.className = 'result-box visible success';
+      el.innerHTML = `
+        <div class="res-label">✓ Image Encrypted & Embedded Successfully</div>
+        <div class="res-msg" style="margin-bottom:8px;">
+          The hidden image was encrypted with AES-GCM (PBKDF2, 150k iterations) and
+          embedded via 1-bit LSB steganography. The carrier looks visually identical.
+          Always download as PNG — JPEG will destroy the hidden data.
+        </div>
+        <a href="${url}" download="${fn}" class="dl-link"><i class="fas fa-download"></i><span>Download Stego Image — ${fn}</span></a>
+        <div style="margin-top:16px;font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--text-dim);margin-bottom:8px;">Visual comparison</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+          <div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:8px;color:var(--text-dim);margin-bottom:4px;">ORIGINAL CARRIER</div>
+            <img src="${document.getElementById('prev-carrier').src}" style="width:100%;border:1px solid var(--border)">
+          </div>
+          <div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:8px;color:var(--green);margin-bottom:4px;">STEGO IMAGE (looks identical)</div>
+            <img src="${url}" style="width:100%;border:1px solid var(--green)">
+          </div>
+        </div>`;
+    }, 'image/png');
 
   } catch(err){
     epHide();
-    showErrorPopup('Embed Failed', 'An error occurred while embedding the image.', err.message);
+    showErrorPopup('Embed Failed', 'An error occurred while embedding.', err.message);
   }
-}
-
-async function _doEmbed(carrier, secret, pw, resId){
-  const cW=carrier.w, cH=carrier.h;
-  const sW=secret.w, sH=secret.h;
-  const headerPx=16;
-
-  // Final safety check
-  if(sW * sH * 4 + headerPx > cW * cH){
-    epHide();
-    showErrorPopup('Image Too Large',
-      `Secret image (${sW}×${sH} = ${(sW*sH).toLocaleString()} px) still exceeds carrier capacity.`,
-      `Needs ${(sW*sH*4+headerPx).toLocaleString()} carrier pixels but only ${(cW*cH).toLocaleString()} available. Use a larger carrier or smaller secret image.`);
-    return;
-  }
-
-  epTitle('Writing Header'); epSet(28,'Encoding header data…',1); await yieldFrame();
-
-  const cData=carrier.ctx.getImageData(0,0,cW,cH);
-  const sData=secret.ctx.getImageData(0,0,sW,sH);
-  const cd=cData.data;
-  const sd=sData.data;
-
-  // ── HEADER ──
-  const pwHash = simpleHash(pw);
-  const header=[
-    (sW>>8)&0xFF, sW&0xFF,
-    (sH>>8)&0xFF, sH&0xFF,
-    (pwHash>>24)&0xFF,(pwHash>>16)&0xFF,(pwHash>>8)&0xFF,pwHash&0xFF
-  ];
-  let headerBits='';
-  for(const b of header) headerBits+=b.toString(2).padStart(8,'0');
-  let bi=0;
-  for(let px=0;px<headerPx&&bi<headerBits.length;px++){
-    const base=px*4;
-    for(let ch=0;ch<3&&bi<headerBits.length;ch++){
-      const twoBits=parseInt(headerBits.substr(bi,2).padEnd(2,'0'),2);
-      cd[base+ch]=(cd[base+ch]&0xFC)|twoBits;
-      bi+=2;
-    }
-  }
-
-  // ── SECRET PIXELS — chunked with progress ──
-  epTitle('Encoding Pixels'); epSet(30,'Starting LSB encoding…',2); await yieldFrame();
-
-  const totalSecretPx=sW*sH;
-  const CHUNK=20000; // pixels per chunk
-  const startTime=performance.now();
-  let lastYield=startTime;
-
-  for(let si_px=0;si_px<totalSecretPx;si_px++){
-    const s_base=si_px*4;
-    const sR=sd[s_base], sG=sd[s_base+1], sB=sd[s_base+2];
-    const bits=(sR<<16)|(sG<<8)|sB;
-    const groups=[(bits>>18)&0x3F,(bits>>12)&0x3F,(bits>>6)&0x3F,bits&0x3F];
-    const c_start=headerPx+si_px*4;
-    for(let g=0;g<4;g++){
-      const c_base=(c_start+g)*4;
-      const g6=groups[g];
-      cd[c_base]  =(cd[c_base]  &0xFC)|((g6>>4)&0x3);
-      cd[c_base+1]=(cd[c_base+1]&0xFC)|((g6>>2)&0x3);
-      cd[c_base+2]=(cd[c_base+2]&0xFC)|(g6&0x3);
-    }
-
-    // Yield every CHUNK pixels
-    if(si_px % CHUNK === 0 && si_px > 0){
-      const now=performance.now();
-      const frac=si_px/totalSecretPx;
-      const elapsed=(now-startTime)/1000;
-      const totalEst=elapsed/frac;
-      const remaining=Math.max(0,totalEst-elapsed);
-      const pct=30+frac*60; // 30→90%
-      const etaStr=remaining>1 ? `ETA: ~${remaining<60?Math.ceil(remaining)+'s':Math.ceil(remaining/60)+'m'}` : 'Almost done…';
-      epSet(pct, `${(si_px/1000).toFixed(0)}k / ${(totalSecretPx/1000).toFixed(0)}k pixels`, 2);
-      epEta(etaStr);
-      await yieldFrame();
-    }
-  }
-
-  epTitle('Finalising'); epSet(92,'Encoding complete — writing output…',3); await yieldFrame();
-
-  carrier.ctx.putImageData(cData,0,0);
-
-  carrier.canvas.toBlob(blob=>{
-    epSet(100,'Done!',3); epEta('');
-    setTimeout(()=>{ epHide(); },400);
-
-    const url=URL.createObjectURL(blob);
-    const fn=randomName('png');
-    const el=document.getElementById(resId);
-    el.className='result-box visible success';
-    el.innerHTML=`
-      <div class="res-label">✓ Image Embedded Successfully</div>
-      <div class="res-msg" style="margin-bottom:8px;">
-        The carrier image looks identical but now contains the secret image
-        (${sW}×${sH}px) hidden in its 2 LSBs per channel.
-      </div>
-      <a href="${url}" download="${fn}" class="dl-link"><i class="fas fa-download"></i><span>Download Stego Image — ${fn}</span></a>
-      <div style="margin-top:16px;font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--text-dim);margin-bottom:8px;">Visual comparison</div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-        <div>
-          <div style="font-family:'JetBrains Mono',monospace;font-size:8px;color:var(--text-dim);margin-bottom:4px;">ORIGINAL CARRIER</div>
-          <img src="${document.getElementById('prev-carrier').src}" style="width:100%;border:1px solid var(--border)">
-        </div>
-        <div>
-          <div style="font-family:'JetBrains Mono',monospace;font-size:8px;color:var(--green);margin-bottom:4px;">STEGO IMAGE (looks same)</div>
-          <img src="${url}" style="width:100%;border:1px solid var(--green)">
-        </div>
-      </div>`;
-  },'image/png');
 }
 
 
 async function selfTestIIG(){
-  // Creates a 4x4 secret, embeds into a 32x32 carrier, extracts, and verifies.
-  // All in-memory — no file I/O. If this fails, the algorithm has a bug.
-  // If this passes but real extraction fails, the problem is file/image loading.
+  // Tests the new AES-GCM + 1-bit LSB pipeline end-to-end in memory (no file I/O).
   const resId='iigExtractResult';
-  showResult(resId,'success','Self-Test Running...','Testing embed/extract pipeline in memory...');
+  showResult(resId,'success','Self-Test Running…','Testing AES-GCM + 1-bit LSB pipeline in memory…');
   await yieldFrame();
 
   try {
-    const cW=32,cH=32,sW=4,sH=4;
-    const headerPx=16;
-    const pw='selftest';
+    const pw = 'avs_selftest_2025';
 
-    // Build carrier (all 200,200,200 gray)
+    // Build a 64×64 carrier (grey)
+    const cW=64, cH=64;
     const carrier=document.createElement('canvas');
     carrier.width=cW; carrier.height=cH;
     const cCtx=carrier.getContext('2d',{colorSpace:'srgb',willReadFrequently:true});
-    cCtx.fillStyle='rgb(200,200,200)';
+    cCtx.fillStyle='rgb(180,180,180)';
     cCtx.fillRect(0,0,cW,cH);
-    const cImg=cCtx.getImageData(0,0,cW,cH);
-    const cd=cImg.data;
 
-    // Build secret (rainbow pixels)
-    const secret=document.createElement('canvas');
-    secret.width=sW; secret.height=sH;
-    const sCtx=secret.getContext('2d',{colorSpace:'srgb',willReadFrequently:true});
-    const sImg=sCtx.createImageData(sW,sH);
-    const sd=sImg.data;
-    for(let i=0;i<sW*sH;i++){
-      sd[i*4]=Math.floor(i*255/15);
-      sd[i*4+1]=Math.floor((sW*sH-i)*255/15);
-      sd[i*4+2]=(i*37)%256;
-      sd[i*4+3]=255;
-    }
+    // Create a tiny "secret file" payload (random bytes, like a real image file)
+    const secretBytes = new Uint8Array(64);
+    crypto.getRandomValues(secretBytes);
+    const secretBuffer = secretBytes.buffer;
+    const secretName   = 'test_secret.png';
+    const secretMime   = 'image/png';
 
-    // === EMBED ===
-    const pwHash=simpleHash(pw);
-    const header=[(sW>>8)&0xFF,sW&0xFF,(sH>>8)&0xFF,sH&0xFF,
-      (pwHash>>24)&0xFF,(pwHash>>16)&0xFF,(pwHash>>8)&0xFF,pwHash&0xFF];
-    let headerBits='';
-    for(const b of header) headerBits+=b.toString(2).padStart(8,'0');
-    let bi=0;
-    for(let px=0;px<headerPx&&bi<headerBits.length;px++){
-      const base=px*4;
-      for(let ch=0;ch<3&&bi<headerBits.length;ch++){
-        const twoBits=parseInt(headerBits.substr(bi,2).padEnd(2,'0'),2);
-        cd[base+ch]=(cd[base+ch]&0xFC)|twoBits;
-        bi+=2;
-      }
-    }
-    for(let si_px=0;si_px<sW*sH;si_px++){
-      const s_base=si_px*4;
-      const sR=sd[s_base],sG=sd[s_base+1],sB=sd[s_base+2];
-      const bits=(sR<<16)|(sG<<8)|sB;
-      const groups=[(bits>>18)&0x3F,(bits>>12)&0x3F,(bits>>6)&0x3F,bits&0x3F];
-      const c_start=headerPx+si_px*4;
-      for(let g=0;g<4;g++){
-        const c_base=(c_start+g)*4;
-        const g6=groups[g];
-        cd[c_base]  =(cd[c_base]  &0xFC)|((g6>>4)&0x3);
-        cd[c_base+1]=(cd[c_base+1]&0xFC)|((g6>>2)&0x3);
-        cd[c_base+2]=(cd[c_base+2]&0xFC)|(g6&0x3);
-      }
-    }
-    cCtx.putImageData(cImg,0,0);
+    // === ENCRYPT ===
+    const encObj = await iigEncryptData(secretBuffer, pw);
+    const payload = {
+      magic:    IIG_MAGIC,
+      filename: secretName,
+      mime:     secretMime,
+      salt:     Array.from(encObj.salt),
+      iv:       Array.from(encObj.iv),
+      data:     Array.from(encObj.encrypted)
+    };
+    const encoder      = new TextEncoder();
+    const payloadBytes = encoder.encode(JSON.stringify(payload));
+    const lenBytes     = new Uint8Array(new Uint32Array([payloadBytes.length]).buffer);
+    const combined     = new Uint8Array(4 + payloadBytes.length);
+    combined.set(lenBytes, 0);
+    combined.set(payloadBytes, 4);
+    const bits = iigBytesToBits(combined);
 
-    // === EXTRACT (direct from canvas — no file roundtrip) ===
-    const readBack=cCtx.getImageData(0,0,cW,cH).data;
-    const hSlots=[];
-    for(let px=0;px<headerPx;px++){
-      const base=px*4;
-      for(let ch=0;ch<3;ch++) hSlots.push(readBack[base+ch]&0x3);
-    }
-    const hB=[];
-    for(let i=0;i<8;i++){
-      const s=i*4;
-      hB.push(((hSlots[s]<<6)|(hSlots[s+1]<<4)|(hSlots[s+2]<<2)|hSlots[s+3])&0xFF);
-    }
-    const xW=(hB[0]<<8)|hB[1], xH=(hB[2]<<8)|hB[3];
-    const xHash=((hB[4]<<24)|(hB[5]<<16)|(hB[6]<<8)|hB[7])>>>0;
-
-    if(xW!==sW||xH!==sH||xHash!==pwHash){
-      showResult(resId,'error','Self-Test FAILED',
-        `Header mismatch: got ${xW}x${xH} hash=${xHash.toString(16)}, expected ${sW}x${sH} hash=${pwHash.toString(16)}. The algorithm itself has a bug.`);
+    // Check capacity
+    const imgData = cCtx.getImageData(0,0,cW,cH);
+    const pd = imgData.data;
+    const usable = Math.floor((pd.length/4)*3);
+    if(bits.length > usable){
+      showResult(resId,'error','Self-Test FAILED',`Carrier too small for test payload (${bits.length} > ${usable} bits). Increase carrier size.`);
       return;
     }
 
-    // Now test PNG roundtrip via toBlob + createImageBitmap
-    const blob = await new Promise(r=>carrier.toBlob(r,'image/png'));
-    const bitmap = await createImageBitmap(blob,{colorSpaceConversion:'none',colorSpace:'srgb'});
-    const rt=document.createElement('canvas');
-    rt.width=cW; rt.height=cH;
-    rt.getContext('2d',{colorSpace:'srgb',willReadFrequently:true}).drawImage(bitmap,0,0);
-    bitmap.close();
-    const rtData=rt.getContext('2d',{colorSpace:'srgb',willReadFrequently:true}).getImageData(0,0,cW,cH).data;
+    // === EMBED ===
+    let bitIndex=0;
+    for(let i=0;i<pd.length;i++){
+      if((i+1)%4===0) continue;
+      if(bitIndex<bits.length){ pd[i]=(pd[i]&0xFE)|bits[bitIndex]; bitIndex++; }
+    }
+    cCtx.putImageData(imgData,0,0);
 
-    // Check that first pixel survived PNG roundtrip exactly
-    let rtOk=true;
-    for(let i=0;i<Math.min(64,rtData.length);i++){
-      if(rtData[i]!==cImg.data[i]){ rtOk=false; break; }
+    // PNG roundtrip
+    const blob = await new Promise(r=>carrier.toBlob(r,'image/png'));
+    const bmp  = await createImageBitmap(blob,{colorSpaceConversion:'none',colorSpace:'srgb'});
+    const rt   = document.createElement('canvas');
+    rt.width=cW; rt.height=cH;
+    rt.getContext('2d',{colorSpace:'srgb',willReadFrequently:true}).drawImage(bmp,0,0);
+    bmp.close();
+    const rtPd = rt.getContext('2d',{colorSpace:'srgb',willReadFrequently:true}).getImageData(0,0,cW,cH).data;
+
+    // === EXTRACT ===
+    const exBits=[];
+    for(let i=0;i<rtPd.length;i++){
+      if((i+1)%4===0) continue;
+      exBits.push(rtPd[i]&1);
+    }
+    const exLenBytes  = iigBitsToBytes(exBits.slice(0,32));
+    const exPayLen    = new Uint32Array(exLenBytes.buffer)[0];
+    const exPayBytes  = iigBitsToBytes(exBits.slice(32,32+exPayLen*8));
+    const exPayload   = JSON.parse(new TextDecoder().decode(exPayBytes));
+
+    if(exPayload.magic !== IIG_MAGIC){
+      showResult(resId,'error','Self-Test FAILED',`Magic mismatch after PNG roundtrip: "${exPayload.magic}". Browser may be altering pixel values.`);
+      return;
     }
 
-    if(!rtOk){
-      showResult(resId,'error','Self-Test FAILED',
-        'PNG toBlob→createImageBitmap roundtrip changed pixel values. Browser color management is corrupting data even with colorSpaceConversion:none. Try a different browser (Chrome/Firefox on desktop recommended).');
+    // === DECRYPT ===
+    const decrypted = await iigDecryptData(
+      new Uint8Array(exPayload.data), pw,
+      new Uint8Array(exPayload.salt), new Uint8Array(exPayload.iv)
+    );
+    const decArr = new Uint8Array(decrypted);
+    let match = decArr.length === secretBytes.length;
+    if(match) for(let i=0;i<decArr.length;i++) if(decArr[i]!==secretBytes[i]){ match=false; break; }
+
+    if(!match){
+      showResult(resId,'error','Self-Test FAILED','Decrypted bytes do not match original secret bytes. Algorithm has a bug.');
       return;
     }
 
     showResult(resId,'success',
       '✓ Self-Test PASSED',
-      'The embed/extract algorithm works correctly in your browser, and PNG roundtrip preserves pixel values exactly.\n\n'+
-      'If real extraction still fails, the problem is with the image file itself — it was likely re-saved, converted to JPEG, or screenshotted after downloading. '+
-      'Use only the PNG file downloaded directly from the embed step.');
+      'AES-GCM encrypt → 1-bit LSB embed → PNG roundtrip → 1-bit LSB extract → AES-GCM decrypt — all verified. ' +
+      'Pixel values survived the PNG roundtrip intact.\n\n' +
+      'If real extraction fails, the stego image was likely re-saved as JPEG, edited, or screenshotted. Use only the PNG downloaded directly from the Embed step.');
 
   } catch(err){
     showResult(resId,'error','Self-Test Error', err.message);
@@ -1892,126 +1869,101 @@ async function selfTestIIG(){
 }
 
 async function extractImageFromImage(){
-  const sInp=document.getElementById('stegoImageForExtract');
-  const pw=document.getElementById('iigExtractPassword').value;
-  const resId='iigExtractResult';
+  const sInp  = document.getElementById('stegoImageForExtract');
+  const pw    = document.getElementById('iigExtractPassword').value;
+  const resId = 'iigExtractResult';
 
   if(!sInp.files.length){ showErrorPopup('Missing Image','Please select a stego image to extract from.'); return; }
+  if(!pw){ showErrorPopup('Missing Password','Please enter the password used during embedding.'); return; }
 
-  showResult(resId,'success','Processing...','Extracting hidden image — please wait...');
+  showResult(resId,'success','Processing…','Loading stego image — please wait…');
   document.getElementById('iig-extracted-preview').style.display='none';
 
   try {
     const stego = await loadImageToCanvas(sInp.files[0]);
-    const sData = stego.ctx.getImageData(0,0,stego.w,stego.h);
-    const sd=sData.data;
-    const headerPx=16;
+    const pd    = stego.ctx.getImageData(0,0,stego.w,stego.h).data;
 
-    // Dump first 16 pixel raw values for diagnosis
-    const rawDump=[];
-    for(let px=0;px<Math.min(8,headerPx);px++){
-      const b=px*4;
-      rawDump.push(`px${px}:[${sd[b]},${sd[b+1]},${sd[b+2]}]`);
+    // ── Extract 1 LSB from each R,G,B channel (skip alpha) ──
+    const bits = [];
+    for(let i=0;i<pd.length;i++){
+      if((i+1)%4===0) continue;
+      bits.push(pd[i] & 1);
     }
-    console.log('[AVS Extract] Image size:',stego.w,'x',stego.h);
-    console.log('[AVS Extract] First 8 pixels raw RGB:', rawDump.join(' '));
 
-    // Read header: 2 LSBs of each channel, 16px x 3ch = 48 slots
-    // Writer packs 2 bits per slot, 4 slots per byte (MSB pair first)
-    const headerSlots=[];
-    for(let px=0;px<headerPx;px++){
-      const base=px*4;
-      for(let ch=0;ch<3;ch++) headerSlots.push(sd[base+ch]&0x3);
-    }
-    console.log('[AVS Extract] Header slots (first 32):', headerSlots.slice(0,32).join(','));
+    // ── Read 4-byte length prefix ──
+    const lenBytes  = iigBitsToBytes(bits.slice(0,32));
+    const payloadLen = new Uint32Array(lenBytes.buffer)[0];
 
-    const hBytes=[];
-    for(let i=0;i<8;i++){
-      const s=i*4;
-      hBytes.push(((headerSlots[s]<<6)|(headerSlots[s+1]<<4)|(headerSlots[s+2]<<2)|headerSlots[s+3])&0xFF);
-    }
-    console.log('[AVS Extract] hBytes:', hBytes.join(','));
-
-    const sW=(hBytes[0]<<8)|hBytes[1];
-    const sH=(hBytes[2]<<8)|hBytes[3];
-    const storedHash=((hBytes[4]<<24)|(hBytes[5]<<16)|(hBytes[6]<<8)|hBytes[7])>>>0;
-    console.log('[AVS Extract] Decoded W='+sW+' H='+sH+' hash='+storedHash.toString(16));
-
-    // Validate
-    const maxFittablePx=Math.floor((stego.w*stego.h-headerPx)/4);
-    if(sW<=0||sH<=0||(sW*sH)>maxFittablePx){
+    if(payloadLen === 0 || payloadLen > (bits.length/8 - 4)){
       showResult(resId,'','','');
-
-      // Try to give a useful diagnosis
-      let diagnosis='';
-      // Check if image might be JPEG (lossy)
       const fileType = sInp.files[0].type;
       const fileName = sInp.files[0].name.toLowerCase();
+      let diagnosis = '';
       if(fileType==='image/jpeg'||fileName.endsWith('.jpg')||fileName.endsWith('.jpeg')){
-        diagnosis='The file appears to be a JPEG — JPEG compression is lossy and destroys LSB data. You must use the PNG file downloaded directly from AVS.';
+        diagnosis = 'The file appears to be a JPEG — JPEG compression is lossy and destroys LSB data. You must use the exact PNG file downloaded from the Embed step.';
       } else {
-        diagnosis=`Header slots [0-7]: ${headerSlots.slice(0,8).join(',')} — hBytes: ${hBytes.join(',')}.\n`+
-          `This usually means the PNG was re-saved, converted, or screenshotted after downloading. `+
-          `Open browser console (F12) for full debug info.`;
+        diagnosis = `Decoded length prefix: ${payloadLen}. The image may have been re-saved, converted, or screenshotted after downloading. Use only the PNG downloaded directly from the Embed step.`;
       }
-
-      showErrorPopup('No Hidden Image Found',
-        `Header decoded ${sW}×${sH}px — does not fit in carrier (${stego.w}×${stego.h}px, max ${Math.floor(Math.sqrt(maxFittablePx))}×${Math.floor(Math.sqrt(maxFittablePx))} secret).`,
+      showErrorPopup('No Hidden Data Found',
+        'This image does not appear to contain data embedded by AVS.',
         diagnosis);
       return;
     }
 
-    // Validate password
-    const pwHash=simpleHash(pw);
-    if(pwHash!==storedHash){
+    // ── Decode JSON payload ──
+    const payloadBytes = iigBitsToBytes(bits.slice(32, 32 + payloadLen*8));
+    let payload;
+    try {
+      payload = JSON.parse(new TextDecoder().decode(payloadBytes));
+    } catch(e){
       showResult(resId,'','','');
-      showErrorPopup('Wrong Password',
-        'The password you entered is incorrect, or this image has no password protection.',
-        `Expected hash ${storedHash.toString(16)}, got ${pwHash.toString(16)}.`);
+      showErrorPopup('Corrupted Payload',
+        'Could not parse the embedded data. The image may have been edited or re-saved as JPEG after embedding.',
+        e.message);
       return;
     }
 
-    showResult(resId,'success','Processing\u2026',`Extracting ${sW}\xd7${sH}px hidden image \u2014 please wait\u2026`);
-    await yieldFrame();
-
-    // Extract secret pixels
-    const outCanvas=document.createElement('canvas');
-    outCanvas.width=sW; outCanvas.height=sH;
-    const outCtx=outCanvas.getContext('2d',{colorSpace:'srgb',willReadFrequently:true});
-    const outData=outCtx.createImageData(sW,sH);
-    const od=outData.data;
-
-    for(let si_px=0;si_px<sW*sH;si_px++){
-      const c_start=headerPx+si_px*4;
-      let bits24=0;
-      for(let g=0;g<4;g++){
-        const c_base=(c_start+g)*4;
-        const r2=(sd[c_base]&0x3);
-        const g2=(sd[c_base+1]&0x3);
-        const b2=(sd[c_base+2]&0x3);
-        const g6=(r2<<4)|(g2<<2)|b2;
-        bits24=(bits24<<6)|g6;
-      }
-      const oR=(bits24>>16)&0xFF;
-      const oG=(bits24>>8)&0xFF;
-      const oB=bits24&0xFF;
-      const ob=si_px*4;
-      od[ob]=oR; od[ob+1]=oG; od[ob+2]=oB; od[ob+3]=255;
+    if(payload.magic !== IIG_MAGIC){
+      showResult(resId,'','','');
+      showErrorPopup('No Hidden Data Found',
+        'The embedded magic signature does not match AVS secure embedding.',
+        `Found: "${payload.magic}" — expected: "${IIG_MAGIC}"`);
+      return;
     }
 
-    outCtx.putImageData(outData,0,0);
-    outCanvas.toBlob(blob=>{
-      const url=URL.createObjectURL(blob);
-      const fn=randomName('png');
-      const el=document.getElementById(resId);
-      el.className='result-box visible success';
-      el.innerHTML=`<div class="res-label">\u2713 Hidden Image Extracted</div>
-        <div class="res-msg">Secret image (${sW}\xd7${sH}px) successfully recovered.</div>
-        <a href="${url}" download="${fn}" class="dl-link" style="margin-top:10px"><i class="fas fa-download"></i><span>Download Secret Image \u2014 ${fn}</span></a>`;
-      const prev=document.getElementById('iig-extracted-preview');
-      document.getElementById('iig-extracted-img').src=url;
-      prev.style.display='block';
-    },'image/png');
+    showResult(resId,'success','Decrypting…','Decrypting hidden image with AES-GCM — please wait…');
+    await yieldFrame();
+
+    // ── AES-GCM decrypt ──
+    let decrypted;
+    try {
+      decrypted = await iigDecryptData(
+        new Uint8Array(payload.data),
+        pw,
+        new Uint8Array(payload.salt),
+        new Uint8Array(payload.iv)
+      );
+    } catch(e){
+      showResult(resId,'','','');
+      showErrorPopup('Wrong Password or Corrupted Data',
+        'AES-GCM decryption failed. The password is incorrect, or the image was modified after embedding.',
+        e.message);
+      return;
+    }
+
+    const blob = new Blob([decrypted], {type: payload.mime || 'image/png'});
+    const url  = URL.createObjectURL(blob);
+    const fn   = payload.filename || randomName('png');
+
+    const el = document.getElementById(resId);
+    el.className = 'result-box visible success';
+    el.innerHTML = `<div class="res-label">✓ Hidden Image Extracted & Decrypted</div>
+      <div class="res-msg">Secret image (<strong>${fn}</strong>) successfully recovered and decrypted via AES-GCM.</div>
+      <a href="${url}" download="${fn}" class="dl-link" style="margin-top:10px"><i class="fas fa-download"></i><span>Download Secret Image — ${fn}</span></a>`;
+
+    const prev = document.getElementById('iig-extracted-preview');
+    document.getElementById('iig-extracted-img').src = url;
+    prev.style.display = 'block';
 
   } catch(err){
     showResult(resId,'','','');
