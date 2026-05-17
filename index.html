@@ -1789,11 +1789,13 @@ async function extractImageFromImage(){
     const storedHash=((hBytes[4]<<24)|(hBytes[5]<<16)|(hBytes[6]<<8)|hBytes[7])>>>0;
 
     // Validate dimensions
-    if(sW<=0||sH<=0||sW>stego.w*4||sH>stego.h*4||sW>4096||sH>4096){
+    // Max secret pixels that could fit: (totalCarrierPixels - headerPx) / 4
+    const maxFittablePx = Math.floor((stego.w * stego.h - headerPx) / 4);
+    if(sW<=0||sH<=0||(sW*sH)>maxFittablePx){
       showResult(resId,'','','');
       showErrorPopup('No Hidden Image Found',
         'This image does not appear to contain a hidden image embedded by AVS.',
-        `Header decoded: ${sW}×${sH}px — invalid dimensions.`);
+        `Header decoded: ${sW}×${sH}px — dimensions don't fit in this carrier (max ~${Math.floor(Math.sqrt(maxFittablePx))}×${Math.floor(Math.sqrt(maxFittablePx))}px).`);
       return;
     }
 
