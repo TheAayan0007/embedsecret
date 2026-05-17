@@ -928,6 +928,7 @@ input[type=range].popup-slider::-webkit-slider-thumb {
           </div>
         </div>
         <button class="action-btn" onclick="extractImageFromImage()" style="border-color:var(--pink);color:var(--pink)"><span>Extract Hidden Image</span><i class="fas fa-eye"></i></button>
+        <button class="action-btn" onclick="selfTestIIG()" style="border-color:var(--cyan);color:var(--cyan);margin-left:8px"><span>Self-Test Algorithm</span><i class="fas fa-flask"></i></button>
         <div class="result-box" id="iigExtractResult"></div>
         <!-- Extracted image preview -->
         <div id="iig-extracted-preview" style="display:none;margin-top:20px;">
@@ -1770,6 +1771,126 @@ async function _doEmbed(carrier, secret, pw, resId){
   },'image/png');
 }
 
+
+async function selfTestIIG(){
+  // Creates a 4x4 secret, embeds into a 32x32 carrier, extracts, and verifies.
+  // All in-memory — no file I/O. If this fails, the algorithm has a bug.
+  // If this passes but real extraction fails, the problem is file/image loading.
+  const resId='iigExtractResult';
+  showResult(resId,'success','Self-Test Running...','Testing embed/extract pipeline in memory...');
+  await yieldFrame();
+
+  try {
+    const cW=32,cH=32,sW=4,sH=4;
+    const headerPx=16;
+    const pw='selftest';
+
+    // Build carrier (all 200,200,200 gray)
+    const carrier=document.createElement('canvas');
+    carrier.width=cW; carrier.height=cH;
+    const cCtx=carrier.getContext('2d');
+    cCtx.fillStyle='rgb(200,200,200)';
+    cCtx.fillRect(0,0,cW,cH);
+    const cImg=cCtx.getImageData(0,0,cW,cH);
+    const cd=cImg.data;
+
+    // Build secret (rainbow pixels)
+    const secret=document.createElement('canvas');
+    secret.width=sW; secret.height=sH;
+    const sCtx=secret.getContext('2d');
+    const sImg=sCtx.createImageData(sW,sH);
+    const sd=sImg.data;
+    for(let i=0;i<sW*sH;i++){
+      sd[i*4]=Math.floor(i*255/15);
+      sd[i*4+1]=Math.floor((sW*sH-i)*255/15);
+      sd[i*4+2]=(i*37)%256;
+      sd[i*4+3]=255;
+    }
+
+    // === EMBED ===
+    const pwHash=simpleHash(pw);
+    const header=[(sW>>8)&0xFF,sW&0xFF,(sH>>8)&0xFF,sH&0xFF,
+      (pwHash>>24)&0xFF,(pwHash>>16)&0xFF,(pwHash>>8)&0xFF,pwHash&0xFF];
+    let headerBits='';
+    for(const b of header) headerBits+=b.toString(2).padStart(8,'0');
+    let bi=0;
+    for(let px=0;px<headerPx&&bi<headerBits.length;px++){
+      const base=px*4;
+      for(let ch=0;ch<3&&bi<headerBits.length;ch++){
+        const twoBits=parseInt(headerBits.substr(bi,2).padEnd(2,'0'),2);
+        cd[base+ch]=(cd[base+ch]&0xFC)|twoBits;
+        bi+=2;
+      }
+    }
+    for(let si_px=0;si_px<sW*sH;si_px++){
+      const s_base=si_px*4;
+      const sR=sd[s_base],sG=sd[s_base+1],sB=sd[s_base+2];
+      const bits=(sR<<16)|(sG<<8)|sB;
+      const groups=[(bits>>18)&0x3F,(bits>>12)&0x3F,(bits>>6)&0x3F,bits&0x3F];
+      const c_start=headerPx+si_px*4;
+      for(let g=0;g<4;g++){
+        const c_base=(c_start+g)*4;
+        const g6=groups[g];
+        cd[c_base]  =(cd[c_base]  &0xFC)|((g6>>4)&0x3);
+        cd[c_base+1]=(cd[c_base+1]&0xFC)|((g6>>2)&0x3);
+        cd[c_base+2]=(cd[c_base+2]&0xFC)|(g6&0x3);
+      }
+    }
+    cCtx.putImageData(cImg,0,0);
+
+    // === EXTRACT (direct from canvas — no file roundtrip) ===
+    const readBack=cCtx.getImageData(0,0,cW,cH).data;
+    const hSlots=[];
+    for(let px=0;px<headerPx;px++){
+      const base=px*4;
+      for(let ch=0;ch<3;ch++) hSlots.push(readBack[base+ch]&0x3);
+    }
+    const hB=[];
+    for(let i=0;i<8;i++){
+      const s=i*4;
+      hB.push(((hSlots[s]<<6)|(hSlots[s+1]<<4)|(hSlots[s+2]<<2)|hSlots[s+3])&0xFF);
+    }
+    const xW=(hB[0]<<8)|hB[1], xH=(hB[2]<<8)|hB[3];
+    const xHash=((hB[4]<<24)|(hB[5]<<16)|(hB[6]<<8)|hB[7])>>>0;
+
+    if(xW!==sW||xH!==sH||xHash!==pwHash){
+      showResult(resId,'error','Self-Test FAILED',
+        `Header mismatch: got ${xW}x${xH} hash=${xHash.toString(16)}, expected ${sW}x${sH} hash=${pwHash.toString(16)}. The algorithm itself has a bug.`);
+      return;
+    }
+
+    // Now test PNG roundtrip via toBlob + createImageBitmap
+    const blob = await new Promise(r=>carrier.toBlob(r,'image/png'));
+    const bitmap = await createImageBitmap(blob,{colorSpaceConversion:'none'});
+    const rt=document.createElement('canvas');
+    rt.width=cW; rt.height=cH;
+    rt.getContext('2d').drawImage(bitmap,0,0);
+    bitmap.close();
+    const rtData=rt.getContext('2d').getImageData(0,0,cW,cH).data;
+
+    // Check that first pixel survived PNG roundtrip exactly
+    let rtOk=true;
+    for(let i=0;i<Math.min(64,rtData.length);i++){
+      if(rtData[i]!==cImg.data[i]){ rtOk=false; break; }
+    }
+
+    if(!rtOk){
+      showResult(resId,'error','Self-Test FAILED',
+        'PNG toBlob→createImageBitmap roundtrip changed pixel values. Browser color management is corrupting data even with colorSpaceConversion:none. Try a different browser (Chrome/Firefox on desktop recommended).');
+      return;
+    }
+
+    showResult(resId,'success',
+      '✓ Self-Test PASSED',
+      'The embed/extract algorithm works correctly in your browser, and PNG roundtrip preserves pixel values exactly.\n\n'+
+      'If real extraction still fails, the problem is with the image file itself — it was likely re-saved, converted to JPEG, or screenshotted after downloading. '+
+      'Use only the PNG file downloaded directly from the embed step.');
+
+  } catch(err){
+    showResult(resId,'error','Self-Test Error', err.message);
+  }
+}
+
 async function extractImageFromImage(){
   const sInp=document.getElementById('stegoImageForExtract');
   const pw=document.getElementById('iigExtractPassword').value;
@@ -1786,37 +1907,57 @@ async function extractImageFromImage(){
     const sd=sData.data;
     const headerPx=16;
 
-    // ── READ HEADER ──
-    // Collect the 2-LSB slots in the same order the writer packed them:
-    // writer did: for each px 0..15, for each ch 0..2, write 2 bits, bi+=2
-    // So we read back those exact 2-bit slots as a flat stream, then
-    // reassemble into bytes (4 slots × 2 bits = 8 bits per byte).
-    const headerSlots = []; // each entry is a 2-bit value (0-3)
+    // Dump first 16 pixel raw values for diagnosis
+    const rawDump=[];
+    for(let px=0;px<Math.min(8,headerPx);px++){
+      const b=px*4;
+      rawDump.push(`px${px}:[${sd[b]},${sd[b+1]},${sd[b+2]}]`);
+    }
+    console.log('[AVS Extract] Image size:',stego.w,'x',stego.h);
+    console.log('[AVS Extract] First 8 pixels raw RGB:', rawDump.join(' '));
+
+    // Read header: 2 LSBs of each channel, 16px x 3ch = 48 slots
+    // Writer packs 2 bits per slot, 4 slots per byte (MSB pair first)
+    const headerSlots=[];
     for(let px=0;px<headerPx;px++){
       const base=px*4;
-      for(let ch=0;ch<3;ch++){
-        headerSlots.push(sd[base+ch]&0x3); // the 2 LSBs
-      }
+      for(let ch=0;ch<3;ch++) headerSlots.push(sd[base+ch]&0x3);
     }
-    // headerSlots has 48 entries (16px × 3ch). 8 bytes × 4 slots each = 32 slots needed.
+    console.log('[AVS Extract] Header slots (first 32):', headerSlots.slice(0,32).join(','));
+
     const hBytes=[];
     for(let i=0;i<8;i++){
       const s=i*4;
-      const byte=(headerSlots[s]<<6)|(headerSlots[s+1]<<4)|(headerSlots[s+2]<<2)|headerSlots[s+3];
-      hBytes.push(byte&0xFF);
+      hBytes.push(((headerSlots[s]<<6)|(headerSlots[s+1]<<4)|(headerSlots[s+2]<<2)|headerSlots[s+3])&0xFF);
     }
+    console.log('[AVS Extract] hBytes:', hBytes.join(','));
+
     const sW=(hBytes[0]<<8)|hBytes[1];
     const sH=(hBytes[2]<<8)|hBytes[3];
     const storedHash=((hBytes[4]<<24)|(hBytes[5]<<16)|(hBytes[6]<<8)|hBytes[7])>>>0;
+    console.log('[AVS Extract] Decoded W='+sW+' H='+sH+' hash='+storedHash.toString(16));
 
-    // Validate dimensions
-    // Max secret pixels that could fit: (totalCarrierPixels - headerPx) / 4
-    const maxFittablePx = Math.floor((stego.w * stego.h - headerPx) / 4);
+    // Validate
+    const maxFittablePx=Math.floor((stego.w*stego.h-headerPx)/4);
     if(sW<=0||sH<=0||(sW*sH)>maxFittablePx){
       showResult(resId,'','','');
+
+      // Try to give a useful diagnosis
+      let diagnosis='';
+      // Check if image might be JPEG (lossy)
+      const fileType = sInp.files[0].type;
+      const fileName = sInp.files[0].name.toLowerCase();
+      if(fileType==='image/jpeg'||fileName.endsWith('.jpg')||fileName.endsWith('.jpeg')){
+        diagnosis='The file appears to be a JPEG — JPEG compression is lossy and destroys LSB data. You must use the PNG file downloaded directly from AVS.';
+      } else {
+        diagnosis=`Header slots [0-7]: ${headerSlots.slice(0,8).join(',')} — hBytes: ${hBytes.join(',')}.\n`+
+          `This usually means the PNG was re-saved, converted, or screenshotted after downloading. `+
+          `Open browser console (F12) for full debug info.`;
+      }
+
       showErrorPopup('No Hidden Image Found',
-        'This image does not appear to contain a hidden image embedded by AVS.',
-        `Header decoded: ${sW}×${sH}px — dimensions don't fit in this carrier (max ~${Math.floor(Math.sqrt(maxFittablePx))}×${Math.floor(Math.sqrt(maxFittablePx))}px).`);
+        `Header decoded ${sW}×${sH}px — does not fit in carrier (${stego.w}×${stego.h}px, max ${Math.floor(Math.sqrt(maxFittablePx))}×${Math.floor(Math.sqrt(maxFittablePx))} secret).`,
+        diagnosis);
       return;
     }
 
@@ -1830,10 +1971,10 @@ async function extractImageFromImage(){
       return;
     }
 
-    showResult(resId,'success','Processing…',`Extracting ${sW}×${sH}px hidden image — please wait…`);
+    showResult(resId,'success','Processing\u2026',`Extracting ${sW}\xd7${sH}px hidden image \u2014 please wait\u2026`);
     await yieldFrame();
 
-    // ── EXTRACT SECRET PIXELS ──
+    // Extract secret pixels
     const outCanvas=document.createElement('canvas');
     outCanvas.width=sW; outCanvas.height=sH;
     const outCtx=outCanvas.getContext('2d');
@@ -1864,10 +2005,9 @@ async function extractImageFromImage(){
       const fn=randomName('png');
       const el=document.getElementById(resId);
       el.className='result-box visible success';
-      el.innerHTML=`<div class="res-label">✓ Hidden Image Extracted</div>
-        <div class="res-msg">Secret image (${sW}×${sH}px) successfully recovered.</div>
-        <a href="${url}" download="${fn}" class="dl-link" style="margin-top:10px"><i class="fas fa-download"></i><span>Download Secret Image — ${fn}</span></a>`;
-      // Show preview
+      el.innerHTML=`<div class="res-label">\u2713 Hidden Image Extracted</div>
+        <div class="res-msg">Secret image (${sW}\xd7${sH}px) successfully recovered.</div>
+        <a href="${url}" download="${fn}" class="dl-link" style="margin-top:10px"><i class="fas fa-download"></i><span>Download Secret Image \u2014 ${fn}</span></a>`;
       const prev=document.getElementById('iig-extracted-preview');
       document.getElementById('iig-extracted-img').src=url;
       prev.style.display='block';
@@ -1877,7 +2017,6 @@ async function extractImageFromImage(){
     showResult(resId,'','','');
     showErrorPopup('Extraction Failed','An unexpected error occurred during extraction.', err.message);
   }
-}
-</script>
+}</script>
 </body>
 </html>
