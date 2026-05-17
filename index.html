@@ -1228,7 +1228,7 @@ function submitEmbedImage(){
     img.onload=()=>{
       const canvas=document.createElement('canvas');
       canvas.width=img.width; canvas.height=img.height;
-      const ctx=canvas.getContext('2d');
+      const ctx=canvas.getContext('2d',{colorSpace:'srgb',willReadFrequently:true});
       ctx.drawImage(img,0,0);
       const imageData=ctx.getImageData(0,0,canvas.width,canvas.height);
       const data=imageData.data;
@@ -1278,7 +1278,7 @@ function submitRetrieveImage(){
     .then(bitmap=>{
       const canvas=document.createElement('canvas');
       canvas.width=bitmap.width; canvas.height=bitmap.height;
-      const ctx=canvas.getContext('2d');
+      const ctx=canvas.getContext('2d',{colorSpace:'srgb',willReadFrequently:true});
       ctx.drawImage(bitmap,0,0);
       bitmap.close();
       const data=ctx.getImageData(0,0,canvas.width,canvas.height).data;
@@ -1525,8 +1525,8 @@ function resizeCanvas(src, scale){
   const nh = Math.max(1, Math.floor(src.h * scale));
   const c = document.createElement('canvas');
   c.width = nw; c.height = nh;
-  c.getContext('2d').drawImage(src.canvas, 0, 0, nw, nh);
-  return { canvas:c, ctx:c.getContext('2d'), w:nw, h:nh };
+  c.getContext('2d',{colorSpace:'srgb',willReadFrequently:true}).drawImage(src.canvas, 0, 0, nw, nh);
+  return { canvas:c, ctx:c.getContext('2d',{colorSpace:'srgb',willReadFrequently:true}), w:nw, h:nh };
 }
 
 function loadImageToCanvas(file){
@@ -1534,11 +1534,11 @@ function loadImageToCanvas(file){
     // Use colorSpaceConversion:'none' so the browser does NOT apply ICC profile
     // correction when decoding the PNG — that correction alters pixel values and
     // corrupts LSB steganographic data before we ever read it.
-    createImageBitmap(file,{colorSpaceConversion:'none'})
+    createImageBitmap(file,{colorSpaceConversion:'none',colorSpace:'srgb'})
       .then(bitmap=>{
         const c=document.createElement('canvas');
         c.width=bitmap.width; c.height=bitmap.height;
-        const ctx=c.getContext('2d');
+        const ctx=c.getContext('2d',{colorSpace:'srgb',willReadFrequently:true});
         ctx.drawImage(bitmap,0,0);
         bitmap.close();
         resolve({canvas:c,ctx,w:c.width,h:c.height});
@@ -1550,9 +1550,9 @@ function loadImageToCanvas(file){
         img.onload=()=>{
           const c=document.createElement('canvas');
           c.width=img.width; c.height=img.height;
-          c.getContext('2d').drawImage(img,0,0);
+          c.getContext('2d',{colorSpace:'srgb',willReadFrequently:true}).drawImage(img,0,0);
           URL.revokeObjectURL(url);
-          resolve({canvas:c,ctx:c.getContext('2d'),w:img.width,h:img.height});
+          resolve({canvas:c,ctx:c.getContext('2d',{colorSpace:'srgb',willReadFrequently:true}),w:img.width,h:img.height});
         };
         img.onerror=()=>{URL.revokeObjectURL(url);reject(new Error('Failed to load image'));};
         img.src=url;
@@ -1788,7 +1788,7 @@ async function selfTestIIG(){
     // Build carrier (all 200,200,200 gray)
     const carrier=document.createElement('canvas');
     carrier.width=cW; carrier.height=cH;
-    const cCtx=carrier.getContext('2d');
+    const cCtx=carrier.getContext('2d',{colorSpace:'srgb',willReadFrequently:true});
     cCtx.fillStyle='rgb(200,200,200)';
     cCtx.fillRect(0,0,cW,cH);
     const cImg=cCtx.getImageData(0,0,cW,cH);
@@ -1797,7 +1797,7 @@ async function selfTestIIG(){
     // Build secret (rainbow pixels)
     const secret=document.createElement('canvas');
     secret.width=sW; secret.height=sH;
-    const sCtx=secret.getContext('2d');
+    const sCtx=secret.getContext('2d',{colorSpace:'srgb',willReadFrequently:true});
     const sImg=sCtx.createImageData(sW,sH);
     const sd=sImg.data;
     for(let i=0;i<sW*sH;i++){
@@ -1861,12 +1861,12 @@ async function selfTestIIG(){
 
     // Now test PNG roundtrip via toBlob + createImageBitmap
     const blob = await new Promise(r=>carrier.toBlob(r,'image/png'));
-    const bitmap = await createImageBitmap(blob,{colorSpaceConversion:'none'});
+    const bitmap = await createImageBitmap(blob,{colorSpaceConversion:'none',colorSpace:'srgb'});
     const rt=document.createElement('canvas');
     rt.width=cW; rt.height=cH;
-    rt.getContext('2d').drawImage(bitmap,0,0);
+    rt.getContext('2d',{colorSpace:'srgb',willReadFrequently:true}).drawImage(bitmap,0,0);
     bitmap.close();
-    const rtData=rt.getContext('2d').getImageData(0,0,cW,cH).data;
+    const rtData=rt.getContext('2d',{colorSpace:'srgb',willReadFrequently:true}).getImageData(0,0,cW,cH).data;
 
     // Check that first pixel survived PNG roundtrip exactly
     let rtOk=true;
@@ -1977,7 +1977,7 @@ async function extractImageFromImage(){
     // Extract secret pixels
     const outCanvas=document.createElement('canvas');
     outCanvas.width=sW; outCanvas.height=sH;
-    const outCtx=outCanvas.getContext('2d');
+    const outCtx=outCanvas.getContext('2d',{colorSpace:'srgb',willReadFrequently:true});
     const outData=outCtx.createImageData(sW,sH);
     const od=outData.data;
 
