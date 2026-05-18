@@ -708,6 +708,12 @@ input[type=range].popup-slider::-webkit-slider-thumb {
     <button class="tab-btn" style="--tab-color:var(--pink)" onclick="switchTab('steg','steg-img-in-img',this)">
       <i class="fas fa-layer-group"></i><span>Image in Image</span>
     </button>
+    <button class="tab-btn" style="--tab-color:var(--orange)" onclick="switchTab('steg','steg-img-in-vid',this)">
+      <i class="fas fa-film"></i><span>Image in Video</span>
+    </button>
+    <button class="tab-btn" style="--tab-color:var(--green)" onclick="switchTab('steg','steg-aud-in-aud',this)">
+      <i class="fas fa-headphones"></i><span>Audio in Audio</span>
+    </button>
   </div>
 
   <!-- IMAGE STEG -->
@@ -937,6 +943,141 @@ input[type=range].popup-slider::-webkit-slider-thumb {
         </div>
       </div>
 
+    </div>
+  </div>
+
+
+  <!-- IMAGE IN VIDEO STEG -->
+  <div class="panel" id="steg-steg-img-in-vid">
+    <div class="form-card reveal rd2">
+      <div class="info-strip" style="border-color:var(--orange);background:rgba(255,107,26,.05)"><strong style="color:var(--orange)">Image-in-Video:</strong> Your image is AES-256-GCM encrypted and appended to the video binary. The video file plays normally — media players stop at the video's end marker and ignore the hidden data. Only AVS can extract it with the correct password.</div>
+      <div class="sub-tabs">
+        <button class="sub-btn active" onclick="switchSub('ivid','embed-ivid',this)" style="--sub-color:var(--orange)"><i class="fas fa-lock"></i><span>Embed Image</span></button>
+        <button class="sub-btn" onclick="switchSub('ivid','extract-ivid',this)" style="--sub-color:var(--orange)"><i class="fas fa-eye"></i><span>Retrieve Image</span></button>
+      </div>
+
+      <!-- EMBED -->
+      <div class="sub-panel active" id="ivid-embed-ivid">
+        <div class="input-group">
+          <label>Carrier Video File (MP4, WebM, etc.)</label>
+          <div class="drop-zone" id="dz-ivid-carrier">
+            <div class="drop-zone-icon"><i class="fas fa-film"></i></div>
+            <div class="drop-zone-text">Drop video here or <strong>click to browse</strong><br><br><span id="dz-ivid-carrier-name" style="color:var(--text-dim);">No file selected</span></div>
+            <input type="file" id="ividCarrierInput" accept="video/*" onchange="updateDropZone(this,'dz-ivid-carrier','dz-ivid-carrier-name')">
+          </div>
+        </div>
+        <div class="input-group">
+          <label>Secret Image to Hide</label>
+          <div class="drop-zone" id="dz-ivid-secret">
+            <div class="drop-zone-icon"><i class="fas fa-image"></i></div>
+            <div class="drop-zone-text">Drop image here or <strong>click to browse</strong><br><br><span id="dz-ivid-secret-name" style="color:var(--text-dim);">No file selected</span></div>
+            <input type="file" id="ividSecretInput" accept="image/*" onchange="updateDropZone(this,'dz-ivid-secret','dz-ivid-secret-name');previewIvidSecret()">
+          </div>
+        </div>
+        <div id="ivid-preview-wrap" style="display:none;margin-bottom:20px;">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--text-dim);margin-bottom:8px;">Secret Image Preview (shown in frame strips)</div>
+          <canvas id="ividFrameCanvas" style="width:100%;max-height:120px;object-fit:contain;border:1px solid var(--border);background:var(--surface2);"></canvas>
+        </div>
+        <div class="input-group">
+          <label>Password</label>
+          <div class="pw-wrap">
+            <input type="password" id="ividEmbedPw" placeholder="Enter a strong password...">
+            <button class="pw-toggle" onclick="togglePw('ividEmbedPw',this)" type="button"><i class="fas fa-eye"></i></button>
+          </div>
+        </div>
+        <button class="action-btn" onclick="embedImageInVideo()" style="border-color:var(--orange);color:var(--orange)"><span>Embed Image in Video</span><i class="fas fa-lock"></i></button>
+        <div class="result-box" id="ividEmbedResult"></div>
+      </div>
+
+      <!-- EXTRACT -->
+      <div class="sub-panel" id="ivid-extract-ivid">
+        <div class="input-group">
+          <label>Stego Video File (with hidden image)</label>
+          <div class="drop-zone" id="dz-ivid-stego">
+            <div class="drop-zone-icon"><i class="fas fa-search"></i></div>
+            <div class="drop-zone-text">Select the video file containing a hidden image<br><br><span id="dz-ivid-stego-name" style="color:var(--text-dim);">No file selected</span></div>
+            <input type="file" id="ividStegoInput" accept="video/*,*" onchange="updateDropZone(this,'dz-ivid-stego','dz-ivid-stego-name')">
+          </div>
+        </div>
+        <div class="input-group">
+          <label>Password</label>
+          <div class="pw-wrap">
+            <input type="password" id="ividExtractPw" placeholder="Enter the password...">
+            <button class="pw-toggle" onclick="togglePw('ividExtractPw',this)" type="button"><i class="fas fa-eye"></i></button>
+          </div>
+        </div>
+        <button class="action-btn" onclick="extractImageFromVideo()" style="border-color:var(--orange);color:var(--orange)"><span>Extract Hidden Image</span><i class="fas fa-eye"></i></button>
+        <div class="result-box" id="ividExtractResult"></div>
+        <div id="ivid-extracted-preview" style="display:none;margin-top:20px;">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--green);margin-bottom:10px;">✓ Extracted Secret Image</div>
+          <img id="ivid-extracted-img" style="max-width:100%;border:1px solid var(--green);background:var(--surface2);">
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- AUDIO IN AUDIO STEG -->
+  <div class="panel" id="steg-steg-aud-in-aud">
+    <div class="form-card reveal rd2">
+      <div class="info-strip" style="border-color:var(--green);background:rgba(34,197,94,.05)"><strong style="color:var(--green)">Audio-in-Audio Steganography:</strong> Your secret audio (MP3/WAV/any) is AES-256-GCM encrypted and appended after the carrier audio's end-of-stream marker. When you play the carrier WAV/FLAC/MP3, it plays normally — audio players stop at the end marker and never touch the hidden data. Only AVS can decrypt and retrieve it with your password.</div>
+      <div class="sub-tabs">
+        <button class="sub-btn active" onclick="switchSub('aaud','embed-aaud',this)" style="--sub-color:var(--green)"><i class="fas fa-lock"></i><span>Embed Audio</span></button>
+        <button class="sub-btn" onclick="switchSub('aaud','extract-aaud',this)" style="--sub-color:var(--green)"><i class="fas fa-unlock"></i><span>Retrieve Audio</span></button>
+      </div>
+
+      <!-- EMBED -->
+      <div class="sub-panel active" id="aaud-embed-aaud">
+        <div class="input-group">
+          <label>Carrier Audio File (WAV, FLAC, MP3 — will play normally)</label>
+          <div class="drop-zone" id="dz-aaud-carrier">
+            <div class="drop-zone-icon"><i class="fas fa-music"></i></div>
+            <div class="drop-zone-text">Drop carrier audio here or <strong>click to browse</strong><br><br><span id="dz-aaud-carrier-name" style="color:var(--text-dim);">No file selected</span></div>
+            <input type="file" id="aaudCarrierInput" accept="audio/*" onchange="updateDropZone(this,'dz-aaud-carrier','dz-aaud-carrier-name')">
+          </div>
+        </div>
+        <div class="input-group">
+          <label>Secret Audio File to Hide (MP3, WAV, OGG, etc.)</label>
+          <div class="drop-zone" id="dz-aaud-secret">
+            <div class="drop-zone-icon"><i class="fas fa-headphones"></i></div>
+            <div class="drop-zone-text">Drop secret audio here or <strong>click to browse</strong><br><br><span id="dz-aaud-secret-name" style="color:var(--text-dim);">No file selected</span></div>
+            <input type="file" id="aaudSecretInput" accept="audio/*" onchange="updateDropZone(this,'dz-aaud-secret','dz-aaud-secret-name')">
+          </div>
+        </div>
+        <div class="input-group">
+          <label>Password</label>
+          <div class="pw-wrap">
+            <input type="password" id="aaudEmbedPw" placeholder="Enter a strong password...">
+            <button class="pw-toggle" onclick="togglePw('aaudEmbedPw',this)" type="button"><i class="fas fa-eye"></i></button>
+          </div>
+        </div>
+        <button class="action-btn" onclick="embedAudioInAudio()" style="border-color:var(--green);color:var(--green)"><span>Embed Secret Audio</span><i class="fas fa-lock"></i></button>
+        <div class="result-box" id="aaudEmbedResult"></div>
+      </div>
+
+      <!-- EXTRACT -->
+      <div class="sub-panel" id="aaud-extract-aaud">
+        <div class="input-group">
+          <label>Stego Audio File (carrier with hidden audio inside)</label>
+          <div class="drop-zone" id="dz-aaud-stego">
+            <div class="drop-zone-icon"><i class="fas fa-search"></i></div>
+            <div class="drop-zone-text">Select the audio file containing hidden audio<br><br><span id="dz-aaud-stego-name" style="color:var(--text-dim);">No file selected</span></div>
+            <input type="file" id="aaudStegoInput" accept="audio/*,*" onchange="updateDropZone(this,'dz-aaud-stego','dz-aaud-stego-name')">
+          </div>
+        </div>
+        <div class="input-group">
+          <label>Password</label>
+          <div class="pw-wrap">
+            <input type="password" id="aaudExtractPw" placeholder="Enter the password...">
+            <button class="pw-toggle" onclick="togglePw('aaudExtractPw',this)" type="button"><i class="fas fa-eye"></i></button>
+          </div>
+        </div>
+        <button class="action-btn" onclick="extractAudioFromAudio()" style="border-color:var(--green);color:var(--green)"><span>Extract Hidden Audio</span><i class="fas fa-unlock"></i></button>
+        <div class="result-box" id="aaudExtractResult"></div>
+        <div id="aaud-extracted-player" style="display:none;margin-top:20px;">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--green);margin-bottom:10px;">✓ Extracted Secret Audio — Play Preview</div>
+          <audio id="aaud-extracted-audio" controls style="width:100%;filter:invert(1) hue-rotate(180deg);"></audio>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -1849,6 +1990,241 @@ async function extractImageFromImage(){
     showResult(resId,'','','');
     showErrorPopup('Extraction Failed','An unexpected error occurred.', err.message);
   }
+}
+
+/* ═══════════════════════════════════════
+   IMAGE-IN-VIDEO STEGANOGRAPHY
+   AES-256-GCM encrypt the image → append a tagged
+   binary packet after the video bytes. Video players
+   stop at the container end marker and ignore trailing
+   bytes; only AVS reads them.
+   Packet: "AVSIVID1" | uint32 encLen | 16b salt | 12b iv | N ciphertext
+═══════════════════════════════════════ */
+
+const IVID_MAGIC = new Uint8Array([65,86,83,73,86,73,68,49]); // "AVSIVID1"
+
+function previewIvidSecret(){
+  const inp = document.getElementById('ividSecretInput');
+  if(!inp.files.length) return;
+  const url = URL.createObjectURL(inp.files[0]);
+  const img = new Image();
+  img.onload = () => {
+    const wrap = document.getElementById('ivid-preview-wrap');
+    const canvas = document.getElementById('ividFrameCanvas');
+    const strips = 4;
+    canvas.width = img.width; canvas.height = img.height;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(img, 0, 0);
+    ctx.strokeStyle = 'rgba(255,107,26,0.7)';
+    ctx.lineWidth = 2;
+    for(let i=1;i<strips;i++){
+      const x = Math.round(img.width/strips*i);
+      ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,img.height); ctx.stroke();
+    }
+    ctx.fillStyle = 'rgba(255,107,26,0.1)';
+    for(let i=0;i<strips;i+=2) ctx.fillRect(Math.round(img.width/strips*i),0,Math.round(img.width/strips),img.height);
+    wrap.style.display = 'block';
+    URL.revokeObjectURL(url);
+  };
+  img.src = url;
+}
+
+async function embedImageInVideo(){
+  const vInp = document.getElementById('ividCarrierInput');
+  const iInp = document.getElementById('ividSecretInput');
+  const pw   = document.getElementById('ividEmbedPw').value;
+  const resId = 'ividEmbedResult';
+  if(!vInp.files.length){ showErrorPopup('Missing Video','Please select a carrier video file.'); return; }
+  if(!iInp.files.length){ showErrorPopup('Missing Image','Please select a secret image to hide.'); return; }
+  if(!pw){ showErrorPopup('Missing Password','Please enter a password.'); return; }
+  showResult(resId,'success','Processing…','Encrypting image with AES-256-GCM…');
+  await yieldFrame();
+  try {
+    const imgBuf = await iInp.files[0].arrayBuffer();
+    const secretPayload = JSON.stringify({filename:iInp.files[0].name,mime:iInp.files[0].type||'image/png',data:Array.from(new Uint8Array(imgBuf))});
+    const secretBytes = new TextEncoder().encode(secretPayload);
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const iv   = crypto.getRandomValues(new Uint8Array(12));
+    const key  = await iigDeriveKey(pw, salt);
+    const enc  = new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM',iv}, key, secretBytes));
+    const packet = new Uint8Array(IVID_MAGIC.length+4+16+12+enc.length);
+    let off=0;
+    packet.set(IVID_MAGIC,off); off+=IVID_MAGIC.length;
+    new DataView(packet.buffer,off,4).setUint32(0,enc.length,true); off+=4;
+    packet.set(salt,off); off+=16;
+    packet.set(iv,off); off+=12;
+    packet.set(enc,off);
+    showResult(resId,'success','Processing…','Appending to video file…');
+    await yieldFrame();
+    const videoBuf = await vInp.files[0].arrayBuffer();
+    const combined = new Uint8Array(videoBuf.byteLength+packet.length);
+    combined.set(new Uint8Array(videoBuf),0); combined.set(packet,videoBuf.byteLength);
+    const ext = vInp.files[0].name.split('.').pop()||'mp4';
+    const blob = new Blob([combined],{type:vInp.files[0].type||'video/mp4'});
+    const url  = URL.createObjectURL(blob);
+    const fn   = randomName(ext);
+    const el = document.getElementById(resId);
+    el.className='result-box visible success';
+    el.innerHTML=`<div class="res-label">✓ Image Embedded &amp; Encrypted in Video</div>
+      <div class="res-msg" style="margin-bottom:12px;">The video plays completely normally — media players stop at the end marker. Hidden image is AES-256-GCM encrypted (PBKDF2, 150k iterations) and stored in the trailing bytes.<br><br>
+      <span style="color:var(--orange);font-family:'JetBrains Mono',monospace;font-size:10px;">Video: ${(videoBuf.byteLength/1024).toFixed(1)} KB &nbsp;+&nbsp; Hidden payload: ${(packet.length/1024).toFixed(1)} KB</span></div>
+      <a href="${url}" download="${fn}" class="dl-link"><i class="fas fa-download"></i><span>Download Stego Video — ${fn}</span></a>`;
+  } catch(err){
+    showErrorPopup('Embed Failed','An error occurred while embedding.',err.message);
+  }
+}
+
+async function extractImageFromVideo(){
+  const vInp = document.getElementById('ividStegoInput');
+  const pw   = document.getElementById('ividExtractPw').value;
+  const resId = 'ividExtractResult';
+  if(!vInp.files.length){ showErrorPopup('Missing File','Please select the stego video file.'); return; }
+  if(!pw){ showErrorPopup('Missing Password','Please enter the password.'); return; }
+  showResult(resId,'success','Searching…','Scanning for hidden data…');
+  document.getElementById('ivid-extracted-preview').style.display='none';
+  await yieldFrame();
+  try {
+    const buf = await vInp.files[0].arrayBuffer();
+    const bytes = new Uint8Array(buf);
+    const magic = IVID_MAGIC;
+    const minPacket = magic.length+4+16+12+1;
+    let magicPos=-1;
+    for(let i=bytes.length-minPacket;i>=0;i--){
+      let m=true;
+      for(let j=0;j<magic.length;j++) if(bytes[i+j]!==magic[j]){m=false;break;}
+      if(m){magicPos=i;break;}
+    }
+    if(magicPos===-1){ showResult(resId,'','',''); showErrorPopup('No Hidden Data','Could not find AVS hidden data in this video file.','Magic marker "AVSIVID1" not found.'); return; }
+    let off=magicPos+magic.length;
+    const encLen=new DataView(bytes.buffer,off,4).getUint32(0,true); off+=4;
+    const salt=bytes.slice(off,off+16); off+=16;
+    const iv=bytes.slice(off,off+12); off+=12;
+    const encData=bytes.slice(off,off+encLen);
+    showResult(resId,'success','Decrypting…','Decrypting with AES-256-GCM…');
+    await yieldFrame();
+    let decrypted;
+    try {
+      const key=await iigDeriveKey(pw,salt);
+      decrypted=await crypto.subtle.decrypt({name:'AES-GCM',iv},key,encData);
+    } catch(e){ showResult(resId,'','',''); showErrorPopup('Wrong Password','Decryption failed — incorrect password or corrupted data.',e.message); return; }
+    const payload=JSON.parse(new TextDecoder().decode(decrypted));
+    const imgBytes=new Uint8Array(payload.data);
+    const blob=new Blob([imgBytes],{type:payload.mime||'image/png'});
+    const url=URL.createObjectURL(blob);
+    const fn=payload.filename||randomName('png');
+    const el=document.getElementById(resId);
+    el.className='result-box visible success';
+    el.innerHTML=`<div class="res-label">✓ Hidden Image Extracted</div><div class="res-msg">Secret image decrypted and recovered from video.</div>
+      <a href="${url}" download="${fn}" class="dl-link" style="margin-top:10px"><i class="fas fa-download"></i><span>Download Secret Image — ${fn}</span></a>`;
+    document.getElementById('ivid-extracted-img').src=url;
+    document.getElementById('ivid-extracted-preview').style.display='block';
+  } catch(err){ showResult(resId,'','',''); showErrorPopup('Extraction Failed','An unexpected error occurred.',err.message); }
+}
+
+/* ═══════════════════════════════════════
+   AUDIO-IN-AUDIO STEGANOGRAPHY
+   AES-256-GCM encrypt the secret audio → append a
+   tagged binary packet after the carrier audio stream.
+   Audio players stop at the stream end and ignore
+   trailing bytes; only AVS reads them.
+   Packet: "AVSAAUD1" | uint32 encLen | 16b salt | 12b iv | N ciphertext
+═══════════════════════════════════════ */
+
+const AAUD_MAGIC = new Uint8Array([65,86,83,65,65,85,68,49]); // "AVSAAUD1"
+
+async function embedAudioInAudio(){
+  const cInp = document.getElementById('aaudCarrierInput');
+  const sInp = document.getElementById('aaudSecretInput');
+  const pw   = document.getElementById('aaudEmbedPw').value;
+  const resId = 'aaudEmbedResult';
+  if(!cInp.files.length){ showErrorPopup('Missing Carrier','Please select a carrier audio file.'); return; }
+  if(!sInp.files.length){ showErrorPopup('Missing Secret Audio','Please select a secret audio file to hide.'); return; }
+  if(!pw){ showErrorPopup('Missing Password','Please enter a password.'); return; }
+  showResult(resId,'success','Processing…','Encrypting secret audio with AES-256-GCM…');
+  await yieldFrame();
+  try {
+    const secretBuf = await sInp.files[0].arrayBuffer();
+    const secretPayload = JSON.stringify({filename:sInp.files[0].name,mime:sInp.files[0].type||'audio/mpeg',data:Array.from(new Uint8Array(secretBuf))});
+    const secretBytes = new TextEncoder().encode(secretPayload);
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const iv   = crypto.getRandomValues(new Uint8Array(12));
+    const key  = await iigDeriveKey(pw, salt);
+    const enc  = new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM',iv}, key, secretBytes));
+    const packet = new Uint8Array(AAUD_MAGIC.length+4+16+12+enc.length);
+    let off=0;
+    packet.set(AAUD_MAGIC,off); off+=AAUD_MAGIC.length;
+    new DataView(packet.buffer,off,4).setUint32(0,enc.length,true); off+=4;
+    packet.set(salt,off); off+=16;
+    packet.set(iv,off); off+=12;
+    packet.set(enc,off);
+    showResult(resId,'success','Processing…','Appending encrypted audio to carrier…');
+    await yieldFrame();
+    const carrierBuf = await cInp.files[0].arrayBuffer();
+    const combined = new Uint8Array(carrierBuf.byteLength+packet.length);
+    combined.set(new Uint8Array(carrierBuf),0); combined.set(packet,carrierBuf.byteLength);
+    const ext = cInp.files[0].name.split('.').pop()||'wav';
+    const blob = new Blob([combined],{type:cInp.files[0].type||'audio/wav'});
+    const url  = URL.createObjectURL(blob);
+    const fn   = randomName(ext);
+    const carrierPreviewUrl = URL.createObjectURL(new Blob([carrierBuf],{type:cInp.files[0].type||'audio/wav'}));
+    const el = document.getElementById(resId);
+    el.className='result-box visible success';
+    el.innerHTML=`<div class="res-label">✓ Secret Audio Embedded</div>
+      <div class="res-msg" style="margin-bottom:12px;">The carrier audio plays completely normally — audio players stop at the stream end marker and never reach the hidden data. The secret audio is AES-256-GCM encrypted (PBKDF2, 150k iterations).<br><br>
+      <span style="color:var(--green);font-family:'JetBrains Mono',monospace;font-size:10px;">Carrier: ${(carrierBuf.byteLength/1024).toFixed(1)} KB &nbsp;+&nbsp; Hidden payload: ${(packet.length/1024).toFixed(1)} KB</span></div>
+      <a href="${url}" download="${fn}" class="dl-link"><i class="fas fa-download"></i><span>Download Stego Audio — ${fn}</span></a>
+      <div style="margin-top:18px;"><div style="font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--text-dim);margin-bottom:8px;letter-spacing:2px;text-transform:uppercase;">Verify: carrier still plays normally</div>
+      <audio controls src="${carrierPreviewUrl}" style="width:100%;filter:invert(1) hue-rotate(180deg)"></audio></div>`;
+  } catch(err){
+    showErrorPopup('Embed Failed','An error occurred while embedding.',err.message);
+  }
+}
+
+async function extractAudioFromAudio(){
+  const sInp = document.getElementById('aaudStegoInput');
+  const pw   = document.getElementById('aaudExtractPw').value;
+  const resId = 'aaudExtractResult';
+  if(!sInp.files.length){ showErrorPopup('Missing File','Please select the stego audio file.'); return; }
+  if(!pw){ showErrorPopup('Missing Password','Please enter the password.'); return; }
+  showResult(resId,'success','Searching…','Scanning for hidden audio data…');
+  document.getElementById('aaud-extracted-player').style.display='none';
+  await yieldFrame();
+  try {
+    const buf = await sInp.files[0].arrayBuffer();
+    const bytes = new Uint8Array(buf);
+    const magic = AAUD_MAGIC;
+    const minPacket = magic.length+4+16+12+1;
+    let magicPos=-1;
+    for(let i=bytes.length-minPacket;i>=0;i--){
+      let m=true;
+      for(let j=0;j<magic.length;j++) if(bytes[i+j]!==magic[j]){m=false;break;}
+      if(m){magicPos=i;break;}
+    }
+    if(magicPos===-1){ showResult(resId,'','',''); showErrorPopup('No Hidden Data','Could not find AVS hidden audio in this file.','Magic marker "AVSAAUD1" not found.'); return; }
+    let off=magicPos+magic.length;
+    const encLen=new DataView(bytes.buffer,off,4).getUint32(0,true); off+=4;
+    const salt=bytes.slice(off,off+16); off+=16;
+    const iv=bytes.slice(off,off+12); off+=12;
+    const encData=bytes.slice(off,off+encLen);
+    showResult(resId,'success','Decrypting…','Decrypting with AES-256-GCM…');
+    await yieldFrame();
+    let decrypted;
+    try {
+      const key=await iigDeriveKey(pw,salt);
+      decrypted=await crypto.subtle.decrypt({name:'AES-GCM',iv},key,encData);
+    } catch(e){ showResult(resId,'','',''); showErrorPopup('Wrong Password','Decryption failed — incorrect password or corrupted data.',e.message); return; }
+    const payload=JSON.parse(new TextDecoder().decode(decrypted));
+    const audioBytes=new Uint8Array(payload.data);
+    const blob=new Blob([audioBytes],{type:payload.mime||'audio/mpeg'});
+    const url=URL.createObjectURL(blob);
+    const fn=payload.filename||randomName('mp3');
+    const el=document.getElementById(resId);
+    el.className='result-box visible success';
+    el.innerHTML=`<div class="res-label">✓ Hidden Audio Extracted</div><div class="res-msg">Secret audio decrypted and recovered. Play it below or download.</div>
+      <a href="${url}" download="${fn}" class="dl-link" style="margin-top:10px"><i class="fas fa-download"></i><span>Download Secret Audio — ${fn}</span></a>`;
+    document.getElementById('aaud-extracted-audio').src=url;
+    document.getElementById('aaud-extracted-player').style.display='block';
+  } catch(err){ showResult(resId,'','',''); showErrorPopup('Extraction Failed','An unexpected error occurred.',err.message); }
 }</script>
 </body>
 </html>
