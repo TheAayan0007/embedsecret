@@ -719,7 +719,7 @@ input[type=range].popup-slider::-webkit-slider-thumb {
   <!-- IMAGE STEG -->
   <div class="panel active" id="steg-steg-image">
     <div class="form-card reveal rd2">
-      <div class="info-strip"><strong>LSB Steganography:</strong> Hides your message in the least-significant bits of the image data. Password-protected with Base64 encryption layer.</div>
+      <div class="info-strip"><strong>LSB Steganography:</strong> Your message is encrypted with AES-256-GCM (key derived from your password via PBKDF2, 600,000 iterations) before being hidden in the image's least-significant bits. Wrong password → decryption simply fails, nothing is revealed.</div>
       <div class="sub-tabs">
         <button class="sub-btn active" onclick="switchSub('steg-img','embed-image',this)"><i class="fas fa-lock"></i><span>Embed Message</span></button>
         <button class="sub-btn" onclick="switchSub('steg-img','retrieve-image',this)"><i class="fas fa-unlock"></i><span>Retrieve Message</span></button>
@@ -776,7 +776,7 @@ input[type=range].popup-slider::-webkit-slider-thumb {
   <!-- VIDEO STEG -->
   <div class="panel" id="steg-steg-video">
     <div class="form-card reveal rd2">
-      <div class="info-strip"><strong>Note:</strong> Video steganography embeds in the Base64-encoded file data. Use the matching retrieve tool with the correct password.</div>
+      <div class="info-strip"><strong>Note:</strong> Your message is encrypted with AES-256-GCM before being embedded in the video's Base64-encoded byte data. Output is a re-encodable .txt file, not a playable video — use the matching Retrieve tool with the correct password.</div>
       <div class="sub-tabs">
         <button class="sub-btn active" onclick="switchSub('steg-vid','embed-video',this)"><i class="fas fa-lock"></i><span>Embed Message</span></button>
         <button class="sub-btn" onclick="switchSub('steg-vid','retrieve-video',this)"><i class="fas fa-unlock"></i><span>Retrieve Message</span></button>
@@ -1209,9 +1209,12 @@ function base64ToBlob(base64, mime){
 function randomName(ext){ return Math.random().toString(36).substr(2,8)+'_avs.'+ext; }
 function sanitizeHTML(str){ const d=document.createElement('div'); d.appendChild(document.createTextNode(str)); return d.innerHTML; }
 
-/* Encrypt/Decrypt password (Base64 layer) */
-function encryptPw(pw){ return btoa(unescape(encodeURIComponent(pw))); }
-function decryptPw(enc){ try{ return decodeURIComponent(escape(atob(enc))); }catch(e){ return null; } }
+/* NOTE: the old Base64 "password encryption" helpers (encryptPw/decryptPw) were
+   removed on security review — Base64 is an encoding, not encryption, and the
+   secret text was previously stored unencrypted alongside it. Text-in-image and
+   text-in-video secrets are now encrypted for real with AES-256-GCM, the same
+   scheme used by the other steganography tools on this page (see iigEncrypt /
+   iigDecrypt further down). */
 
 /* LSB Steganography helpers */
 function stringToBinary(str){
@@ -1351,7 +1354,7 @@ function convertTextToAudio(){
   reader.readAsText(inp.files[0]);
 }
 
-/* ══ EMBED IMAGE STEGANOGRAPHY ══ */
+/* ══ EMBED IMAGE STEGANOGRAPHY (message is AES-256-GCM encrypted before hiding) ══ */
 function submitEmbedImage(){
   const imgInp=document.getElementById('imageForEmbedding');
   const msg=document.getElementById('secretMessageImage').value.trim();
@@ -1366,38 +1369,54 @@ function submitEmbedImage(){
   const reader=new FileReader();
   reader.onload=e=>{
     const img=new Image();
-    img.onload=()=>{
-      const canvas=document.createElement('canvas');
-      canvas.width=img.width; canvas.height=img.height;
-      const ctx=canvas.getContext('2d',{colorSpace:'srgb',willReadFrequently:true});
-      ctx.drawImage(img,0,0);
-      const imageData=ctx.getImageData(0,0,canvas.width,canvas.height);
-      const data=imageData.data;
+    img.onload=async ()=>{
+      try{
+        const canvas=document.createElement('canvas');
+        canvas.width=img.width; canvas.height=img.height;
+        const ctx=canvas.getContext('2d',{colorSpace:'srgb',willReadFrequently:true});
+        ctx.drawImage(img,0,0);
+        const imageData=ctx.getImageData(0,0,canvas.width,canvas.height);
+        const data=imageData.data;
 
-      // Build payload: encryptedPw:message + terminator
-      const encPw=encryptPw(pw);
-      const payload=encPw+':'+msg+'\x00'; // null terminator
-      const binary=stringToBinary(payload);
+        // Encrypt the message for real: AES-256-GCM with a PBKDF2-derived key,
+        // fresh random salt + iv. The password is never itself embedded anywhere.
+        const msgBytes=new TextEncoder().encode(msg);
+        const encObj=await iigEncrypt(msgBytes, pw);
+        const payload={magic:MSG_MAGIC, salt:Array.from(encObj.salt), iv:Array.from(encObj.iv), data:Array.from(encObj.encrypted)};
+        const payloadBytes=new TextEncoder().encode(JSON.stringify(payload));
+        const lengthBytes=new Uint8Array(new Uint32Array([payloadBytes.length]).buffer);
+        const combined=new Uint8Array(4+payloadBytes.length);
+        combined.set(lengthBytes,0);
+        combined.set(payloadBytes,4);
+        const bits=iigBytesToBits(combined);
 
-      if(binary.length > data.length*0.75){
-        showResult(resId,'error','Error','Image too small for this message. Use a larger image or shorter message.');
-        return;
+        const usableBits=Math.floor(data.length/4)*3;
+        if(bits.length>usableBits){
+          showResult(resId,'error','Error','Image too small for this message. Use a larger image or shorter message.');
+          return;
+        }
+
+        // Embed in LSB of R,G,B channels (skip alpha)
+        let bitIdx=0;
+        for(let i=0;i<data.length && bitIdx<bits.length;i++){
+          if((i%4)===3) continue; // skip alpha
+          data[i]=(data[i]&0xFE)|bits[bitIdx];
+          bitIdx++;
+        }
+        ctx.putImageData(imageData,0,0);
+
+        canvas.toBlob(blob=>{
+          const url=URL.createObjectURL(blob);
+          const fn=randomName('png');
+          const el=document.getElementById(resId);
+          el.className='result-box visible success';
+          el.innerHTML=`<div class="res-label">✓ Message Embedded &amp; Encrypted</div>
+            <div class="res-msg">Your message was encrypted with AES-256-GCM (PBKDF2, 600,000 iterations) before being hidden in the image — it is not stored as plain text. Only the correct password can recover it.</div>
+            <a href="${url}" download="${fn}" class="dl-link" style="margin-top:10px"><i class="fas fa-download"></i><span>Download Stego Image — ${fn}</span></a>`;
+        },'image/png');
+      } catch(err){
+        showResult(resId,'error','Error','Failed to embed message: '+err.message);
       }
-
-      // Embed in LSB of R,G,B channels (skip alpha)
-      let bitIdx=0;
-      for(let i=0;i<data.length && bitIdx<binary.length;i++){
-        if((i%4)===3) continue; // skip alpha
-        data[i]=(data[i]&0xFE)|parseInt(binary[bitIdx],10);
-        bitIdx++;
-      }
-      ctx.putImageData(imageData,0,0);
-
-      canvas.toBlob(blob=>{
-        const url=URL.createObjectURL(blob);
-        const fn=randomName('png');
-        showDownload(resId,url,fn,'Download Stego Image');
-      },'image/png');
     };
     img.onerror=()=>showResult(resId,'error','Error','Could not load the image. Please try a different file.');
     img.src=e.target.result;
@@ -1406,8 +1425,8 @@ function submitEmbedImage(){
   reader.readAsDataURL(file);
 }
 
-/* ══ RETRIEVE IMAGE STEGANOGRAPHY ══ */
-function submitRetrieveImage(){
+/* ══ RETRIEVE IMAGE STEGANOGRAPHY (decrypts with AES-256-GCM) ══ */
+async function submitRetrieveImage(){
   const imgInp=document.getElementById('imageForRetrieving');
   const pw=document.getElementById('passwordRetrieveImage').value;
   const resId='retrieveImageResult';
@@ -1415,50 +1434,60 @@ function submitRetrieveImage(){
   if(!imgInp.files.length){ showResult(resId,'error','Error','Please select an image file.'); return; }
   if(!pw){ showResult(resId,'error','Error','Please enter the password.'); return; }
 
-  createImageBitmap(imgInp.files[0],{colorSpaceConversion:'none'})
-    .then(bitmap=>{
-      const canvas=document.createElement('canvas');
-      canvas.width=bitmap.width; canvas.height=bitmap.height;
-      const ctx=canvas.getContext('2d',{colorSpace:'srgb',willReadFrequently:true});
-      ctx.drawImage(bitmap,0,0);
-      bitmap.close();
-      const data=ctx.getImageData(0,0,canvas.width,canvas.height).data;
+  try{
+    const bitmap=await createImageBitmap(imgInp.files[0],{colorSpaceConversion:'none'});
+    const canvas=document.createElement('canvas');
+    canvas.width=bitmap.width; canvas.height=bitmap.height;
+    const ctx=canvas.getContext('2d',{colorSpace:'srgb',willReadFrequently:true});
+    ctx.drawImage(bitmap,0,0);
+    bitmap.close();
+    const data=ctx.getImageData(0,0,canvas.width,canvas.height).data;
 
-      let bits='';
-      for(let i=0;i<data.length;i++){
-        if((i%4)===3) continue;
-        bits+=(data[i]&1).toString();
-      }
+    const bits=[];
+    for(let i=0;i<data.length;i++){
+      if((i%4)===3) continue;
+      bits.push(data[i]&1);
+    }
 
-      let decoded='';
-      for(let i=0;i+7<bits.length;i+=8){
-        const ch=String.fromCharCode(parseInt(bits.substr(i,8),2));
-        if(ch==='\x00') break;
-        decoded+=ch;
-      }
+    // First 32 bits encode the payload byte-length as a Uint32
+    const lenBytes=iigBitsToBytes(bits.slice(0,32));
+    const payloadLen=new Uint32Array(lenBytes.buffer)[0];
 
-      const sepIdx=decoded.indexOf(':');
-      if(sepIdx===-1){
-        const preview=decoded.substring(0,40).replace(/[^\x20-\x7E]/g,'·');
-        showResult(resId,'error','No Data Found',
-          `No hidden message found. Decoded: "${preview}" — image may have been re-saved as JPEG (lossy) or is the wrong file.`);
-        return;
-      }
+    if(!payloadLen || payloadLen>(bits.length/8)-4){
+      showResult(resId,'error','No Data Found','No hidden message found in this image — it may have been re-saved as JPEG (lossy) or is the wrong file.');
+      return;
+    }
 
-      const storedEncPw=decoded.substring(0,sepIdx);
-      const secretMsg=decoded.substring(sepIdx+1);
-      const storedPw=decryptPw(storedEncPw);
+    const payloadBytes=iigBitsToBytes(bits.slice(32, 32+payloadLen*8));
+    let payload;
+    try{
+      payload=JSON.parse(new TextDecoder().decode(payloadBytes));
+    } catch(parseErr){
+      showResult(resId,'error','Corrupt Data','Could not read a valid payload from this image.');
+      return;
+    }
 
-      if(storedPw===null){ showResult(resId,'error','Decryption Failed',`Could not decrypt embedded data.`); return; }
-      if(pw!==storedPw){ showResult(resId,'error','Wrong Password','The password is incorrect.'); return; }
+    if(payload.magic!==MSG_MAGIC){
+      showResult(resId,'error','No Data Found','This image was not encoded with AVS text-in-image steganography.');
+      return;
+    }
 
-      showResult(resId,'success','✓ Message Retrieved',sanitizeHTML(secretMsg));
-    })
-    .catch(err=>showResult(resId,'error','Error','Could not load image: '+err.message));
+    let decrypted;
+    try{
+      decrypted=await iigDecrypt(new Uint8Array(payload.data), pw, new Uint8Array(payload.salt), new Uint8Array(payload.iv));
+    } catch(decErr){
+      showResult(resId,'error','Wrong Password','The password is incorrect.');
+      return;
+    }
+
+    showResult(resId,'success','✓ Message Retrieved',sanitizeHTML(new TextDecoder().decode(decrypted)));
+  } catch(err){
+    showResult(resId,'error','Error','Could not load image: '+err.message);
+  }
 }
 
 /* ══ EMBED VIDEO STEGANOGRAPHY ══ */
-function submitEmbedVideo(){
+async function submitEmbedVideo(){
   const vidInp=document.getElementById('videoForEmbedding');
   const msg=document.getElementById('secretMessageVideo').value.trim();
   const pw=document.getElementById('passwordVideo').value;
@@ -1470,32 +1499,58 @@ function submitEmbedVideo(){
 
   const file=vidInp.files[0];
   const reader=new FileReader();
-  reader.onload=e=>{
-    const b64=e.target.result.split(',')[1];
-    const encPw=encryptPw(pw);
-    const payload=encPw+':'+msg;
-    const binary=stringToBinary(payload);
-    const binaryData=atob(b64);
+  reader.onload=async evt=>{
+    try{
+      const b64=evt.target.result.split(',')[1];
+      const binaryData=atob(b64);
+      const chars=new Uint8Array(binaryData.length);
+      for(let i=0;i<binaryData.length;i++) chars[i]=binaryData.charCodeAt(i);
 
-    // Embed in LSBs of binary data (up to 1024 bits)
-    let chars=binaryData.split('').map(c=>c.charCodeAt(0));
-    const bitsToEmbed=Math.min(binary.length,chars.length);
-    for(let i=0;i<bitsToEmbed;i++){
-      chars[i]=(chars[i]&0xFE)|parseInt(binary[i],10);
+      // Encrypt the message for real: AES-256-GCM with a PBKDF2-derived key.
+      const msgBytes=new TextEncoder().encode(msg);
+      const encObj=await iigEncrypt(msgBytes, pw);
+      const payload={magic:MSG_MAGIC, salt:Array.from(encObj.salt), iv:Array.from(encObj.iv), data:Array.from(encObj.encrypted)};
+      const payloadBytes=new TextEncoder().encode(JSON.stringify(payload));
+      const lengthBytes=new Uint8Array(new Uint32Array([payloadBytes.length]).buffer);
+      const combined=new Uint8Array(4+payloadBytes.length);
+      combined.set(lengthBytes,0);
+      combined.set(payloadBytes,4);
+      const bits=iigBytesToBits(combined);
+
+      if(bits.length>chars.length){
+        showResult(resId,'error','Error','This video file is too small to hold the encrypted message. Use a larger video or a shorter message.');
+        return;
+      }
+
+      // Embed in LSBs of the video's raw byte data
+      for(let i=0;i<bits.length;i++){
+        chars[i]=(chars[i]&0xFE)|bits[i];
+      }
+
+      let outStr='';
+      const CHUNK=8192;
+      for(let i=0;i<chars.length;i+=CHUNK){
+        outStr+=String.fromCharCode.apply(null, chars.subarray(i,Math.min(i+CHUNK,chars.length)));
+      }
+      const modified=btoa(outStr);
+      const blob=new Blob([modified],{type:'text/plain'});
+      const url=URL.createObjectURL(blob);
+      const fn=randomName('txt');
+      const el=document.getElementById(resId);
+      el.className='result-box visible success';
+      el.innerHTML=`<div class="res-label">✓ Message Embedded &amp; Encrypted</div>
+        <div class="res-msg">Your message was encrypted with AES-256-GCM (PBKDF2, 600,000 iterations) before being hidden — it is not stored as plain text. This produces a re-encodable .txt file, not a playable video; use the matching Retrieve tool to get your message back.</div>
+        <a href="${url}" download="${fn}" class="dl-link" style="margin-top:10px"><i class="fas fa-download"></i><span>Download Encoded Text File — ${fn}</span></a>`;
+    } catch(err){
+      showResult(resId,'error','Error','Failed to embed message: '+err.message);
     }
-
-    const modified=btoa(chars.map(c=>String.fromCharCode(c)).join(''));
-    const blob=new Blob([modified],{type:'text/plain'});
-    const url=URL.createObjectURL(blob);
-    const fn=randomName('txt');
-    showDownload(resId,url,fn,'Download Encoded Text File');
   };
   reader.onerror=()=>showResult(resId,'error','Error','Failed to read the file.');
   reader.readAsDataURL(file);
 }
 
-/* ══ RETRIEVE VIDEO STEGANOGRAPHY ══ */
-function submitRetrieveVideo(){
+/* ══ RETRIEVE VIDEO STEGANOGRAPHY (decrypts with AES-256-GCM) ══ */
+async function submitRetrieveVideo(){
   const vidInp=document.getElementById('videoForRetrieving');
   const pw=document.getElementById('passwordRetrieveVideo').value;
   const resId='retrieveVideoResult';
@@ -1504,28 +1559,54 @@ function submitRetrieveVideo(){
   if(!pw){ showResult(resId,'error','Error','Please enter the password.'); return; }
 
   const reader=new FileReader();
-  reader.onload=e=>{
-    let b64=e.target.result.trim();
-    if(!isValidBase64(b64)){ showResult(resId,'error','Invalid File','The file does not contain valid encoded data.'); return; }
+  reader.onload=async evt=>{
+    try{
+      const b64=evt.target.result.trim();
+      if(!isValidBase64(b64)){ showResult(resId,'error','Invalid File','The file does not contain valid encoded data.'); return; }
 
-    const binaryData=atob(b64);
-    let bits='';
-    for(let i=0;i<binaryData.length&&bits.length<1024;i++){
-      bits+=(binaryData.charCodeAt(i)&1).toString();
+      const binaryData=atob(b64);
+      const chars=new Uint8Array(binaryData.length);
+      for(let i=0;i<binaryData.length;i++) chars[i]=binaryData.charCodeAt(i);
+
+      // First 32 bits encode the payload byte-length as a Uint32
+      const headerBits=[];
+      for(let i=0;i<chars.length && headerBits.length<32;i++) headerBits.push(chars[i]&1);
+      const payloadLen=new Uint32Array(iigBitsToBytes(headerBits).buffer)[0];
+
+      if(!payloadLen || (32+payloadLen*8)>chars.length){
+        showResult(resId,'error','No Data Found','No hidden message was found in this file.');
+        return;
+      }
+
+      const totalBits=32+payloadLen*8;
+      const allBits=[];
+      for(let i=0;i<chars.length && allBits.length<totalBits;i++) allBits.push(chars[i]&1);
+
+      const payloadBytes=iigBitsToBytes(allBits.slice(32));
+      let payload;
+      try{
+        payload=JSON.parse(new TextDecoder().decode(payloadBytes));
+      } catch(parseErr){
+        showResult(resId,'error','Corrupt Data','Could not read a valid payload from this file.');
+        return;
+      }
+      if(payload.magic!==MSG_MAGIC){
+        showResult(resId,'error','No Data Found','This file was not encoded with AVS text-in-video steganography.');
+        return;
+      }
+
+      let decrypted;
+      try{
+        decrypted=await iigDecrypt(new Uint8Array(payload.data), pw, new Uint8Array(payload.salt), new Uint8Array(payload.iv));
+      } catch(decErr){
+        showResult(resId,'error','Wrong Password','The password is incorrect.');
+        return;
+      }
+
+      showResult(resId,'success','✓ Message Retrieved',sanitizeHTML(new TextDecoder().decode(decrypted)));
+    } catch(err){
+      showResult(resId,'error','Error','Failed to extract message: '+err.message);
     }
-
-    const decoded=binaryToString(bits);
-    const sepIdx=decoded.indexOf(':');
-    if(sepIdx===-1){ showResult(resId,'error','No Data Found','No hidden message was found in this file.'); return; }
-
-    const storedEncPw=decoded.substring(0,sepIdx);
-    const secretMsg=decoded.substring(sepIdx+1).replace(/\x00.*$/,'');
-    const storedPw=decryptPw(storedEncPw);
-
-    if(storedPw===null){ showResult(resId,'error','Decryption Failed','Could not decrypt the embedded data.'); return; }
-    if(pw!==storedPw){ showResult(resId,'error','Wrong Password','The password is incorrect.'); return; }
-
-    showResult(resId,'success','✓ Message Retrieved',sanitizeHTML(secretMsg));
   };
   reader.onerror=()=>showResult(resId,'error','Error','Failed to read the file.');
   reader.readAsText(vidInp.files[0]);
@@ -1741,8 +1822,9 @@ function epEta(t){ document.getElementById('epEta').textContent=t; }
 /* Yield to browser to repaint */
 function yieldFrame(){ return new Promise(r=>setTimeout(r,0)); }
 
-/* ══ AES-GCM CRYPTO HELPERS (from Secure Steganography Vault) ══ */
+/* ══ AES-GCM CRYPTO HELPERS (shared by every steganography tool on this page) ══ */
 const IIG_MAGIC = "STEGO_SECURE_V2";
+const MSG_MAGIC = "STEGO_MSG_V1";
 
 function iigBytesToBits(bytes){
   const bits=[];
@@ -1767,7 +1849,7 @@ async function iigDeriveKey(password, salt){
     'raw', encoder.encode(password), {name:'PBKDF2'}, false, ['deriveKey']
   );
   return crypto.subtle.deriveKey(
-    {name:'PBKDF2', salt, iterations:150000, hash:'SHA-256'},
+    {name:'PBKDF2', salt, iterations:600000, hash:'SHA-256'},
     km, {name:'AES-GCM', length:256}, false, ['encrypt','decrypt']
   );
 }
@@ -1870,7 +1952,7 @@ async function embedImageInImage(){
         <div class="res-label">✓ Image Embedded &amp; Encrypted</div>
         <div class="res-msg" style="margin-bottom:8px;">
           The carrier image looks identical but now contains the secret image
-          encrypted with AES-256-GCM + PBKDF2 (150,000 iterations). Only the correct password can recover it.
+          encrypted with AES-256-GCM + PBKDF2 (600,000 iterations). Only the correct password can recover it.
         </div>
         <a href="${url}" download="${fn}" class="dl-link"><i class="fas fa-download"></i><span>Download Stego Image — ${fn}</span></a>
         <div style="margin-top:16px;font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--text-dim);margin-bottom:8px;">Visual comparison</div>
@@ -1895,7 +1977,7 @@ async function embedImageInImage(){
 async function selfTestIIG(){
   const resId='iigExtractResult';
   showResult(resId,'success','✓ AES-256-GCM Active',
-    'This tool now uses real AES-256-GCM encryption with PBKDF2 key derivation (150,000 iterations).\n\n' +
+    'This tool now uses real AES-256-GCM encryption with PBKDF2 key derivation (600,000 iterations).\n\n' +
     'Embed: secret image → AES-GCM encrypt → JSON payload → 1-LSB per RGB channel.\n' +
     'Extract: read LSBs → reassemble payload → AES-GCM decrypt → original file.\n\n' +
     'Without the correct password the encrypted data is computationally unrecoverable.');
@@ -1994,14 +2076,14 @@ async function extractImageFromImage(){
 
 /* ═══════════════════════════════════════
    IMAGE-IN-VIDEO STEGANOGRAPHY
-   AES-256-GCM encrypt the image → append a tagged
-   binary packet after the video bytes. Video players
-   stop at the container end marker and ignore trailing
-   bytes; only AVS reads them.
-   Packet: "AVSIVID1" | uint32 encLen | 16b salt | 12b iv | N ciphertext
+   AES-256-GCM encrypt the image → append an encrypted
+   packet after the video bytes. Video players stop at
+   the container end marker and ignore trailing bytes;
+   only AVS reads them. No readable signature is stored —
+   fields are located by fixed size counted back from EOF,
+   so a plain string/hex scan won't fingerprint the file.
+   Trailer layout: [...video][ciphertext][salt(16)][iv(12)][encLen(4, uint32 LE)]
 ═══════════════════════════════════════ */
-
-const IVID_MAGIC = new Uint8Array([65,86,83,73,86,73,68,49]); // "AVSIVID1"
 
 function previewIvidSecret(){
   const inp = document.getElementById('ividSecretInput');
@@ -2047,13 +2129,13 @@ async function embedImageInVideo(){
     const iv   = crypto.getRandomValues(new Uint8Array(12));
     const key  = await iigDeriveKey(pw, salt);
     const enc  = new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM',iv}, key, secretBytes));
-    const packet = new Uint8Array(IVID_MAGIC.length+4+16+12+enc.length);
+    // No readable signature — fixed-size fields counted back from EOF instead.
+    const packet = new Uint8Array(enc.length+16+12+4);
     let off=0;
-    packet.set(IVID_MAGIC,off); off+=IVID_MAGIC.length;
-    new DataView(packet.buffer,off,4).setUint32(0,enc.length,true); off+=4;
+    packet.set(enc,off); off+=enc.length;
     packet.set(salt,off); off+=16;
     packet.set(iv,off); off+=12;
-    packet.set(enc,off);
+    new DataView(packet.buffer,off,4).setUint32(0,enc.length,true);
     showResult(resId,'success','Processing…','Appending to video file…');
     await yieldFrame();
     const videoBuf = await vInp.files[0].arrayBuffer();
@@ -2066,7 +2148,7 @@ async function embedImageInVideo(){
     const el = document.getElementById(resId);
     el.className='result-box visible success';
     el.innerHTML=`<div class="res-label">✓ Image Embedded &amp; Encrypted in Video</div>
-      <div class="res-msg" style="margin-bottom:12px;">The video plays completely normally — media players stop at the end marker. Hidden image is AES-256-GCM encrypted (PBKDF2, 150k iterations) and stored in the trailing bytes.<br><br>
+      <div class="res-msg" style="margin-bottom:12px;">The video plays completely normally — media players stop at the end marker. Hidden image is AES-256-GCM encrypted (PBKDF2, 600,000 iterations), and the trailer has no readable signature, so a plain content scan won't identify it as AVS data. Note: the file is still larger than an unmodified copy — that size difference remains detectable to anyone comparing file sizes or examining the file's structure.<br><br>
       <span style="color:var(--orange);font-family:'JetBrains Mono',monospace;font-size:10px;">Video: ${(videoBuf.byteLength/1024).toFixed(1)} KB &nbsp;+&nbsp; Hidden payload: ${(packet.length/1024).toFixed(1)} KB</span></div>
       <a href="${url}" download="${fn}" class="dl-link"><i class="fas fa-download"></i><span>Download Stego Video — ${fn}</span></a>`;
   } catch(err){
@@ -2080,34 +2162,32 @@ async function extractImageFromVideo(){
   const resId = 'ividExtractResult';
   if(!vInp.files.length){ showErrorPopup('Missing File','Please select the stego video file.'); return; }
   if(!pw){ showErrorPopup('Missing Password','Please enter the password.'); return; }
-  showResult(resId,'success','Searching…','Scanning for hidden data…');
+  showResult(resId,'success','Reading…','Reading trailer data…');
   document.getElementById('ivid-extracted-preview').style.display='none';
   await yieldFrame();
   try {
     const buf = await vInp.files[0].arrayBuffer();
     const bytes = new Uint8Array(buf);
-    const magic = IVID_MAGIC;
-    const minPacket = magic.length+4+16+12+1;
-    let magicPos=-1;
-    for(let i=bytes.length-minPacket;i>=0;i--){
-      let m=true;
-      for(let j=0;j<magic.length;j++) if(bytes[i+j]!==magic[j]){m=false;break;}
-      if(m){magicPos=i;break;}
+    const total = bytes.length;
+    if(total<32){ showResult(resId,'','',''); showErrorPopup('No Hidden Data','This file is too small to contain AVS hidden data.',''); return; }
+    const encLen=new DataView(bytes.buffer, total-4, 4).getUint32(0,true);
+    if(!Number.isFinite(encLen) || encLen<0 || encLen>total-32){
+      showResult(resId,'','',''); showErrorPopup('No Hidden Data','Could not find AVS hidden data in this video file.','No valid trailer found.'); return;
     }
-    if(magicPos===-1){ showResult(resId,'','',''); showErrorPopup('No Hidden Data','Could not find AVS hidden data in this video file.','Magic marker "AVSIVID1" not found.'); return; }
-    let off=magicPos+magic.length;
-    const encLen=new DataView(bytes.buffer,off,4).getUint32(0,true); off+=4;
-    const salt=bytes.slice(off,off+16); off+=16;
-    const iv=bytes.slice(off,off+12); off+=12;
-    const encData=bytes.slice(off,off+encLen);
+    const iv=bytes.slice(total-16, total-4);
+    const salt=bytes.slice(total-32, total-16);
+    const encData=bytes.slice(total-32-encLen, total-32);
     showResult(resId,'success','Decrypting…','Decrypting with AES-256-GCM…');
     await yieldFrame();
     let decrypted;
     try {
       const key=await iigDeriveKey(pw,salt);
       decrypted=await crypto.subtle.decrypt({name:'AES-GCM',iv},key,encData);
-    } catch(e){ showResult(resId,'','',''); showErrorPopup('Wrong Password','Decryption failed — incorrect password or corrupted data.',e.message); return; }
-    const payload=JSON.parse(new TextDecoder().decode(decrypted));
+    } catch(e){ showResult(resId,'','',''); showErrorPopup('Wrong Password','Decryption failed — incorrect password, or this file has no AVS hidden data.',''); return; }
+    let payload;
+    try{
+      payload=JSON.parse(new TextDecoder().decode(decrypted));
+    } catch(e){ showResult(resId,'','',''); showErrorPopup('Corrupt Data','Hidden data was decrypted but could not be read.',''); return; }
     const imgBytes=new Uint8Array(payload.data);
     const blob=new Blob([imgBytes],{type:payload.mime||'image/png'});
     const url=URL.createObjectURL(blob);
@@ -2123,14 +2203,15 @@ async function extractImageFromVideo(){
 
 /* ═══════════════════════════════════════
    AUDIO-IN-AUDIO STEGANOGRAPHY
-   AES-256-GCM encrypt the secret audio → append a
-   tagged binary packet after the carrier audio stream.
+   AES-256-GCM encrypt the secret audio → append an
+   encrypted packet after the carrier audio stream.
    Audio players stop at the stream end and ignore
-   trailing bytes; only AVS reads them.
-   Packet: "AVSAAUD1" | uint32 encLen | 16b salt | 12b iv | N ciphertext
+   trailing bytes; only AVS reads them. No readable
+   signature is stored — fields are located by fixed
+   size counted back from EOF, so a plain string/hex
+   scan won't fingerprint the file.
+   Trailer layout: [...audio][ciphertext][salt(16)][iv(12)][encLen(4, uint32 LE)]
 ═══════════════════════════════════════ */
-
-const AAUD_MAGIC = new Uint8Array([65,86,83,65,65,85,68,49]); // "AVSAAUD1"
 
 async function embedAudioInAudio(){
   const cInp = document.getElementById('aaudCarrierInput');
@@ -2150,13 +2231,13 @@ async function embedAudioInAudio(){
     const iv   = crypto.getRandomValues(new Uint8Array(12));
     const key  = await iigDeriveKey(pw, salt);
     const enc  = new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM',iv}, key, secretBytes));
-    const packet = new Uint8Array(AAUD_MAGIC.length+4+16+12+enc.length);
+    // No readable signature — fixed-size fields counted back from EOF instead.
+    const packet = new Uint8Array(enc.length+16+12+4);
     let off=0;
-    packet.set(AAUD_MAGIC,off); off+=AAUD_MAGIC.length;
-    new DataView(packet.buffer,off,4).setUint32(0,enc.length,true); off+=4;
+    packet.set(enc,off); off+=enc.length;
     packet.set(salt,off); off+=16;
     packet.set(iv,off); off+=12;
-    packet.set(enc,off);
+    new DataView(packet.buffer,off,4).setUint32(0,enc.length,true);
     showResult(resId,'success','Processing…','Appending encrypted audio to carrier…');
     await yieldFrame();
     const carrierBuf = await cInp.files[0].arrayBuffer();
@@ -2170,7 +2251,7 @@ async function embedAudioInAudio(){
     const el = document.getElementById(resId);
     el.className='result-box visible success';
     el.innerHTML=`<div class="res-label">✓ Secret Audio Embedded</div>
-      <div class="res-msg" style="margin-bottom:12px;">The carrier audio plays completely normally — audio players stop at the stream end marker and never reach the hidden data. The secret audio is AES-256-GCM encrypted (PBKDF2, 150k iterations).<br><br>
+      <div class="res-msg" style="margin-bottom:12px;">The carrier audio plays completely normally — audio players stop at the stream end and never reach the trailing bytes. The secret audio is AES-256-GCM encrypted (PBKDF2, 600,000 iterations), and the trailer has no readable signature, so a plain content scan won't identify it as AVS data. Note: the file is still larger than an unmodified copy — that remains detectable to anyone comparing file sizes or examining the file's structure.<br><br>
       <span style="color:var(--green);font-family:'JetBrains Mono',monospace;font-size:10px;">Carrier: ${(carrierBuf.byteLength/1024).toFixed(1)} KB &nbsp;+&nbsp; Hidden payload: ${(packet.length/1024).toFixed(1)} KB</span></div>
       <a href="${url}" download="${fn}" class="dl-link"><i class="fas fa-download"></i><span>Download Stego Audio — ${fn}</span></a>
       <div style="margin-top:18px;"><div style="font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--text-dim);margin-bottom:8px;letter-spacing:2px;text-transform:uppercase;">Verify: carrier still plays normally</div>
@@ -2186,34 +2267,32 @@ async function extractAudioFromAudio(){
   const resId = 'aaudExtractResult';
   if(!sInp.files.length){ showErrorPopup('Missing File','Please select the stego audio file.'); return; }
   if(!pw){ showErrorPopup('Missing Password','Please enter the password.'); return; }
-  showResult(resId,'success','Searching…','Scanning for hidden audio data…');
+  showResult(resId,'success','Reading…','Reading trailer data…');
   document.getElementById('aaud-extracted-player').style.display='none';
   await yieldFrame();
   try {
     const buf = await sInp.files[0].arrayBuffer();
     const bytes = new Uint8Array(buf);
-    const magic = AAUD_MAGIC;
-    const minPacket = magic.length+4+16+12+1;
-    let magicPos=-1;
-    for(let i=bytes.length-minPacket;i>=0;i--){
-      let m=true;
-      for(let j=0;j<magic.length;j++) if(bytes[i+j]!==magic[j]){m=false;break;}
-      if(m){magicPos=i;break;}
+    const total = bytes.length;
+    if(total<32){ showResult(resId,'','',''); showErrorPopup('No Hidden Data','This file is too small to contain AVS hidden audio.',''); return; }
+    const encLen=new DataView(bytes.buffer, total-4, 4).getUint32(0,true);
+    if(!Number.isFinite(encLen) || encLen<0 || encLen>total-32){
+      showResult(resId,'','',''); showErrorPopup('No Hidden Data','Could not find AVS hidden audio in this file.','No valid trailer found.'); return;
     }
-    if(magicPos===-1){ showResult(resId,'','',''); showErrorPopup('No Hidden Data','Could not find AVS hidden audio in this file.','Magic marker "AVSAAUD1" not found.'); return; }
-    let off=magicPos+magic.length;
-    const encLen=new DataView(bytes.buffer,off,4).getUint32(0,true); off+=4;
-    const salt=bytes.slice(off,off+16); off+=16;
-    const iv=bytes.slice(off,off+12); off+=12;
-    const encData=bytes.slice(off,off+encLen);
+    const iv=bytes.slice(total-16, total-4);
+    const salt=bytes.slice(total-32, total-16);
+    const encData=bytes.slice(total-32-encLen, total-32);
     showResult(resId,'success','Decrypting…','Decrypting with AES-256-GCM…');
     await yieldFrame();
     let decrypted;
     try {
       const key=await iigDeriveKey(pw,salt);
       decrypted=await crypto.subtle.decrypt({name:'AES-GCM',iv},key,encData);
-    } catch(e){ showResult(resId,'','',''); showErrorPopup('Wrong Password','Decryption failed — incorrect password or corrupted data.',e.message); return; }
-    const payload=JSON.parse(new TextDecoder().decode(decrypted));
+    } catch(e){ showResult(resId,'','',''); showErrorPopup('Wrong Password','Decryption failed — incorrect password, or this file has no AVS hidden audio.',''); return; }
+    let payload;
+    try{
+      payload=JSON.parse(new TextDecoder().decode(decrypted));
+    } catch(e){ showResult(resId,'','',''); showErrorPopup('Corrupt Data','Hidden data was decrypted but could not be read.',''); return; }
     const audioBytes=new Uint8Array(payload.data);
     const blob=new Blob([audioBytes],{type:payload.mime||'audio/mpeg'});
     const url=URL.createObjectURL(blob);
